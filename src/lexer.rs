@@ -17,10 +17,10 @@ pub enum Token<'input> {
     CurlyOpen,
     CurlyClose,
     Define(&'input str, &'input str, Option<&'input str>),
-    BlockBegin(&'input str, Option<&'input str>),
-    BlockEnd(Option<&'input str>),
-    String(&'input str),
+    BlockKeyword(&'input str),
+    ValueString(&'input str),
     EOL,
+    EOF,
     // Variable
 }
 
@@ -93,14 +93,14 @@ impl<'input> Lexer<'input> {
         } else if identifier.eq_ignore_ascii_case("processconfig") {
             return Some(Ok((
                 start_index,
-                Token::BlockBegin(&self.input[start_index..end_index], None),
+                Token::BlockKeyword(&self.input[start_index..end_index]),
                 end_index,
             )));
         }
 
         Some(Ok((
             start_index,
-            Token::String(&self.input[start_index..end_index]),
+            Token::Key(&self.input[start_index..end_index]),
             end_index,
         )))
     }
@@ -224,7 +224,7 @@ impl<'input> Lexer<'input> {
                 },
             }
         };
-        Some(Ok((start_index, Token::String(s), end_index)))
+        Some(Ok((start_index, Token::ValueString(s), end_index)))
     }
 }
 
@@ -254,6 +254,11 @@ impl<'input> Iterator for Lexer<'input> {
                         self.start_of_line = false;
                         return self.scan_identifier(i, c);
                     }
+                    '/' => {
+                        if let Some((_, '/')) = self.chars.peek() {
+                            return self.scan_comment(i);
+                        }
+                    }
                     c if self.found_assign_op
                         && (c.is_alphanumeric() || c.is_ascii_punctuation()) =>
                     {
@@ -261,12 +266,7 @@ impl<'input> Iterator for Lexer<'input> {
                         // end of the line
                         return self.scan_value(i);
                     }
-                    '"' | '\'' => return self.scan_quote(i, c),
-                    '/' => {
-                        if let Some((_, '/')) = self.chars.peek() {
-                            return self.scan_comment(i);
-                        }
-                    }
+
                     '{' => return self.scan_char(i, Token::CurlyOpen),
                     '}' => return self.scan_char(i, Token::CurlyClose),
                     '(' => return self.scan_char(i, Token::ParenOpen),
@@ -389,9 +389,9 @@ mod tests {
 
         let mut i = 0;
         let expected_tokens = vec![
-            Token::BlockBegin("ProcessConfig", None),
+            Token::BlockKeyword("ProcessConfig"),
             Token::AssignOp,
-            Token::String("MyApp"),
+            Token::ValueString("MyApp"),
             Token::Comment("This is a \"comment\""),
         ];
         check_tokens(&mut lexer, expected_tokens);
@@ -402,9 +402,9 @@ mod tests {
         let input = r#"TestValue = This is a Test "Comment // Test" \"// Actual Comment"#;
         let mut lexer = Lexer::new(input);
         let expected_tokens = vec![
-            Token::String("TestValue"),
+            Token::Key("TestValue"),
             Token::AssignOp,
-            Token::String(r#"This is a Test "Comment // Test" \""#),
+            Token::ValueString(r#"This is a Test "Comment // Test" \""#),
             Token::Comment("Actual Comment"),
         ];
         check_tokens(&mut lexer, expected_tokens);

@@ -10,34 +10,32 @@ grammar<'input>(input: &'input str);
 pub Lines: Vec<Line<'input>> = <Line*>;
 
 pub Line: Line<'input> = {
-    <comment:"Comment"> "EOL" => Line::Comment(comment),
     Define => <>,
     BlockBegin => <>,
     BlockEnd => <>,
+    Assignment => <>,
     "EOL" => Line::EmptyLine,
-    // TODO: Assignment
+    <comment:"Comment"> => Line::Comment(comment),
 }
 
-//pub Moos: Token<'input> = {
-//    "Quote" => Token::Quote(<>), 
-//    "Comment" => Token::Comment(<>),
-//    Define => <>,
-//    BlockBegin => <>,
-//}
-
 BlockBegin: Line<'input> = {
-    "BlockBegin" "=" <name:"String"> "EOL" "{" => Line::BlockBegin(name, None),
-    "BlockBegin" "=" <name:"String"> <comment:"Comment"> "EOL" "{" => Line::BlockBegin(name, Some(comment)),
+    "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"> "EOL" "{" => Line::BlockBegin(name, Some(comment)),
+    "BlockKeyword" "=" <name:"ValueString"> "EOL" "{" => Line::BlockBegin(name, None),
 }
 
 BlockEnd: Line<'input> = {
-    "BlockEnd" "EOL" => Line::BlockEnd(None),
-    "BlockEnd" <comment:"Comment"> "EOL" => Line::BlockEnd(Some(comment)),
+    "}" <comment:"Comment"> "EOL" => Line::BlockEnd(Some(comment)),
+    "}" "EOL" => Line::BlockEnd(None),
 }
 
 Define: Line<'input> = {
-    <d:"Define"> <name:"String"> "=" <value:"String"> "EOL" => Line::Define(name, value, None),
-    <d:"Define"> <name:"String"> "=" <value:"String"> <comment:"Comment"> "EOL" => Line::Define(name, value, Some(comment)),
+    <d:"Define"> <name:"Key"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Define(name, value, Some(comment)),
+    <d:"Define"> <name:"Key"> "=" <value:"ValueString"> "EOL" => Line::Define(name, value, None),
+}
+
+Assignment: Line<'input> = {
+    <key:"Key"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Assignment(key,value, Some(comment)),
+    <key:"Key"> "=" <value:"ValueString"> "EOL" => Line::Assignment(key,value, None),
 }
 
 //Integer: i64 = <s:r"[0-9]+"> => i64::from_str(s.trim_end_matches("L")).unwrap();
@@ -54,9 +52,9 @@ extern {
         "Comment" => Token::Comment(<&'input str>),
         "Quote" => Token::Quote(<&'input str>),
         "Define" => Token::Define(<&'input str>, <&'input str>, <Option<&'input str>>),
-        "BlockBegin" => Token::BlockBegin(<&'input str>, <Option<&'input str>>),
-        "BlockEnd" => Token::BlockEnd(<Option<&'input str>>),
-        "String" => Token::String(<&'input str>),
+        "BlockKeyword" => Token::BlockKeyword(<&'input str>),
+        "Key" => Token::Key(<&'input str>),
+        "ValueString" => Token::ValueString(<&'input str>),
         "EOL" => Token::EOL,
         "{" => Token::CurlyOpen,
         "}" => Token::CurlyClose,

@@ -85,6 +85,7 @@ mod tests {
             println!("Parser Token: {:?}", token);
         }
 
+        lexer = Lexer::new(input);
         let result = moos::LinesParser::new().parse(input, lexer);
         println!("Result: {:?}", result);
     }
