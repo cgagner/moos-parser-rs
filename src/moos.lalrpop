@@ -1,0 +1,64 @@
+use std::str::FromStr;
+
+use crate::helpers::remove_first_last;
+use crate::lexer::Token;
+use crate::parser::Line;
+use crate::error::ParseError;
+
+grammar<'input>(input: &'input str);
+
+pub Lines: Vec<Line<'input>> = <Line*>;
+
+pub Line: Line<'input> = {
+    <comment:"Comment"> "EOL" => Line::Comment(comment),
+    Define => <>,
+    BlockBegin => <>,
+    BlockEnd => <>,
+    "EOL" => Line::EmptyLine,
+    // TODO: Assignment
+}
+
+//pub Moos: Token<'input> = {
+//    "Quote" => Token::Quote(<>), 
+//    "Comment" => Token::Comment(<>),
+//    Define => <>,
+//    BlockBegin => <>,
+//}
+
+BlockBegin: Line<'input> = {
+    "BlockBegin" "=" <name:"String"> "EOL" "{" => Line::BlockBegin(name, None),
+    "BlockBegin" "=" <name:"String"> <comment:"Comment"> "EOL" "{" => Line::BlockBegin(name, Some(comment)),
+}
+
+BlockEnd: Line<'input> = {
+    "BlockEnd" "EOL" => Line::BlockEnd(None),
+    "BlockEnd" <comment:"Comment"> "EOL" => Line::BlockEnd(Some(comment)),
+}
+
+Define: Line<'input> = {
+    <d:"Define"> <name:"String"> "=" <value:"String"> "EOL" => Line::Define(name, value, None),
+    <d:"Define"> <name:"String"> "=" <value:"String"> <comment:"Comment"> "EOL" => Line::Define(name, value, Some(comment)),
+}
+
+//Integer: i64 = <s:r"[0-9]+"> => i64::from_str(s.trim_end_matches("L")).unwrap();
+//Float: f64 = <s:r"[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?"> => f64::from_str(s).unwrap();
+
+extern {  
+    type Location = usize;
+    type Error = ParseError;
+    
+    enum Token<'input> {
+        "(" => Token::ParenOpen, 
+        ")" => Token::ParenClose, 
+        "=" => Token::AssignOp,
+        "Comment" => Token::Comment(<&'input str>),
+        "Quote" => Token::Quote(<&'input str>),
+        "Define" => Token::Define(<&'input str>, <&'input str>, <Option<&'input str>>),
+        "BlockBegin" => Token::BlockBegin(<&'input str>, <Option<&'input str>>),
+        "BlockEnd" => Token::BlockEnd(<Option<&'input str>>),
+        "String" => Token::String(<&'input str>),
+        "EOL" => Token::EOL,
+        "{" => Token::CurlyOpen,
+        "}" => Token::CurlyClose,
+    }
+}
