@@ -12,7 +12,7 @@ pub enum Line<'input> {
     BlockBegin(&'input str, Option<&'input str>),
     BlockEnd(Option<&'input str>),
     Assignment(&'input str, &'input str, Option<&'input str>),
-    EmptyLine,
+    EndOfLine,
 }
 
 // ----------------------------------------------------------------------------
@@ -40,7 +40,7 @@ mod tests {
 
 
 
-        //${TEST}      = 12
+        ${TEST}      = 12
         MOOSTimeWarp = 1
 
 

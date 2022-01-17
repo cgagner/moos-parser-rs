@@ -16,9 +16,10 @@ pub enum Token<'input> {
     ParenClose,
     CurlyOpen,
     CurlyClose,
-    Define(&'input str, &'input str, Option<&'input str>),
+    DefineKeyword,
     BlockKeyword(&'input str),
     ValueString(&'input str),
+    Variable(&'input str),
     EOL,
     EOF,
     // Variable
@@ -82,11 +83,7 @@ impl<'input> Lexer<'input> {
             if let Some((j, ':')) = self.current {
                 self.found_define_op = true;
                 self.current = self.chars.next();
-                return Some(Ok((
-                    start_index,
-                    Token::Define(&self.input[start_index..j], "", None),
-                    j,
-                )));
+                return Some(Ok((start_index, Token::DefineKeyword, j)));
             } else {
                 // TODO: Error
             }
@@ -202,12 +199,14 @@ impl<'input> Lexer<'input> {
                             self.current = self.chars.next()
                         }
                     }
+                    // Handle Quotes
                     '"' | '\'' => {
                         let result = self.scan_quote(j, c);
                         if let Some(Err(e)) = result {
                             return Some(Err(e));
                         }
                     }
+                    // Handle Comments
                     '/' => {
                         if let Some((_, '/')) = self.chars.peek() {
                             break (&self.input[start_index..j], j);
@@ -215,6 +214,7 @@ impl<'input> Lexer<'input> {
                             self.current = self.chars.next();
                         }
                     }
+                    // Handle New Lines
                     '\n' => {
                         break (&self.input[start_index..j], j);
                     }
@@ -226,16 +226,56 @@ impl<'input> Lexer<'input> {
         };
         Some(Ok((start_index, Token::ValueString(s), end_index)))
     }
+
+    fn scan_variable(&mut self, i: usize) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+        self.current = self.chars.next();
+
+        if let Some((_, '{')) = self.current {
+            self.current = self.chars.next();
+        } else {
+            return None; // Should never get here
+        }
+
+        while let Some((j, c)) = self.current {
+            self.current = self.chars.next();
+            if c == '\\' {
+                // Take an extra char for escape characters
+                if let Some((_, _)) = self.current {
+                    self.current = self.chars.next()
+                }
+            } else if c == '}' {
+                return Some(Ok((i, Token::Variable(&self.input[i + 2..j]), j)));
+            } else if c == '\n' {
+                self.handle_new_line();
+                // The original mission format didn't allow multi-line strings
+                // so we'll do the same here.
+                // @TODO: Report an error "missing trailing `'`
+                return Some(Err(ParseError::new_missing_trailing('}', j)));
+            }
+        }
+        Some(Err(ParseError::new_missing_trailing('}', self.input.len())))
+    }
 }
 
 impl<'input> Iterator for Lexer<'input> {
     type Item = Spanned<Token<'input>, usize, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            let next_c = self.chars.peek().unwrap_or(&(0, '\0')).1;
             match self.current {
                 None => return None, // End of file
                 Some((i, c)) => match c {
-                    ' ' | '\r' | '\t' => {} // Skip whitespace
+                    // Skip whitespace
+                    ' ' | '\r' | '\t' => {}
+                    // Skip Escape characters
+                    '\\' => {
+                        self.current = self.chars.next();
+                        // Take an extra char for escape characters
+                        if let Some((_, _)) = self.current {
+                            self.current = self.chars.next()
+                        }
+                    }
+                    // New Lines
                     '\n' => {
                         self.handle_new_line();
                         self.current = self.chars.next();
@@ -247,17 +287,14 @@ impl<'input> Iterator for Lexer<'input> {
                                 _ => break,
                             }
                         }
-
                         return Some(Ok((i, Token::EOL, i)));
                     }
                     c if (self.start_of_line || self.found_define_op) && c.is_alphanumeric() => {
                         self.start_of_line = false;
                         return self.scan_identifier(i, c);
                     }
-                    '/' => {
-                        if let Some((_, '/')) = self.chars.peek() {
-                            return self.scan_comment(i);
-                        }
+                    c if c == '/' && next_c == '/' => {
+                        return self.scan_comment(i);
                     }
                     c if self.found_assign_op
                         && (c.is_alphanumeric() || c.is_ascii_punctuation()) =>
@@ -266,7 +303,10 @@ impl<'input> Iterator for Lexer<'input> {
                         // end of the line
                         return self.scan_value(i);
                     }
-
+                    c if c == '$' && next_c == '{' => {
+                        self.start_of_line = false;
+                        return self.scan_variable(i);
+                    }
                     '{' => return self.scan_char(i, Token::CurlyOpen),
                     '}' => return self.scan_char(i, Token::CurlyClose),
                     '(' => return self.scan_char(i, Token::ParenOpen),

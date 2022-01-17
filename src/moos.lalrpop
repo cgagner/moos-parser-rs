@@ -1,5 +1,4 @@
 use std::str::FromStr;
-
 use crate::helpers::remove_first_last;
 use crate::lexer::Token;
 use crate::parser::Line;
@@ -14,7 +13,7 @@ pub Line: Line<'input> = {
     BlockBegin => <>,
     BlockEnd => <>,
     Assignment => <>,
-    "EOL" => Line::EmptyLine,
+    "EOL" => Line::EndOfLine,
     <comment:"Comment"> => Line::Comment(comment),
 }
 
@@ -33,13 +32,16 @@ Define: Line<'input> = {
     <d:"Define"> <name:"Key"> "=" <value:"ValueString"> "EOL" => Line::Define(name, value, None),
 }
 
+// TODO: I'm not sure we should be parsing variables like this here...
+// It might be easier to treat everything as a string, and handle variables
+// later. Technically, variables could be anything. E.G.
+// export TEST="TEST=1234"
 Assignment: Line<'input> = {
     <key:"Key"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Assignment(key,value, Some(comment)),
     <key:"Key"> "=" <value:"ValueString"> "EOL" => Line::Assignment(key,value, None),
+    <key:"Variable"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Assignment(key,value, Some(comment)),
+    <key:"Variable"> "=" <value:"ValueString"> "EOL" => Line::Assignment(key,value, None),
 }
-
-//Integer: i64 = <s:r"[0-9]+"> => i64::from_str(s.trim_end_matches("L")).unwrap();
-//Float: f64 = <s:r"[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?"> => f64::from_str(s).unwrap();
 
 extern {  
     type Location = usize;
@@ -51,11 +53,12 @@ extern {
         "=" => Token::AssignOp,
         "Comment" => Token::Comment(<&'input str>),
         "Quote" => Token::Quote(<&'input str>),
-        "Define" => Token::Define(<&'input str>, <&'input str>, <Option<&'input str>>),
+        "Define" => Token::DefineKeyword,
         "BlockKeyword" => Token::BlockKeyword(<&'input str>),
         "Key" => Token::Key(<&'input str>),
         "ValueString" => Token::ValueString(<&'input str>),
         "EOL" => Token::EOL,
+        "Variable" => Token::Variable(<&'input str>),
         "{" => Token::CurlyOpen,
         "}" => Token::CurlyClose,
     }
