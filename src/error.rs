@@ -27,11 +27,19 @@ impl ParseError {
             loc_end: loc_end,
         }
     }
+    pub fn new_missing_new_line() -> ParseError {
+        ParseError {
+            kind: ParseErrorKind::MissingNewLine,
+            loc_start: 0,
+            loc_end: 0,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ParseErrorKind {
     MissingTrailing(char),
+    MissingNewLine,
     InvalidConfigBlock,
     UnexpectedSymbol(char),
 }

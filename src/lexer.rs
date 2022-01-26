@@ -1,4 +1,4 @@
-use crate::error::{ParseError, ParseErrorKind};
+use crate::error::ParseError;
 use std::str::CharIndices;
 
 pub type Spanned<Token, Loc, Error> = Result<(Loc, Token, Loc), Error>;
@@ -133,7 +133,10 @@ impl<'input> Lexer<'input> {
     }
 
     #[inline]
-    fn scan_comment(&mut self, i: usize) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    fn scan_comment(
+        &mut self,
+        start_index: usize,
+    ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
         self.current = self.chars.next();
 
         if let Some((_, '/')) = self.current {
@@ -153,19 +156,29 @@ impl<'input> Lexer<'input> {
                 _ => break,
             }
         }
+        // TODO: Need to figure out if this is better look at user iter.position
 
+        // Or continue with:
         while let Some((j, c)) = self.current {
             match c {
                 '\n' => {
                     self.handle_new_line();
-                    return Some(Ok((i, Token::Comment(&self.input[i + skip_start..j]), j)));
+                    return Some(Ok((
+                        start_index,
+                        Token::Comment(&self.input[start_index + skip_start..j]),
+                        j,
+                    )));
                 }
                 _ => {}
             }
             self.current = self.chars.next();
         }
         let j = self.input.len();
-        Some(Ok((i, Token::Comment(&self.input[i + skip_start..j]), j)))
+        Some(Ok((
+            start_index,
+            Token::Comment(&self.input[start_index + skip_start..j]),
+            j,
+        )))
     }
 
     #[inline]
@@ -183,14 +196,14 @@ impl<'input> Lexer<'input> {
         &mut self,
         start_index: usize,
     ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
-        self.current = self.chars.next();
-
         let (s, end_index) = loop {
             match self.current {
                 None => break (&self.input[start_index..], self.input.len()),
                 Some((j, c)) => match c {
                     // Skip Escape characters
                     '\\' => {
+                        // TODO: Should we skip escaped new lines? The
+                        // original parser did not
                         self.current = self.chars.next();
                         println!("Skipping escape");
                         // Take an extra char for escape characters
@@ -199,12 +212,15 @@ impl<'input> Lexer<'input> {
                             self.current = self.chars.next()
                         }
                     }
+
                     // Handle Quotes
                     '"' | '\'' => {
                         let result = self.scan_quote(j, c);
                         if let Some(Err(e)) = result {
                             return Some(Err(e));
                         }
+                        // TODO: Check if the next token is the end of line.
+                        // this also needs to skip white space
                     }
                     // Handle Comments
                     '/' => {
@@ -224,7 +240,12 @@ impl<'input> Lexer<'input> {
                 },
             }
         };
-        Some(Ok((start_index, Token::ValueString(s), end_index)))
+        let s = s.trim_end();
+        Some(Ok((
+            start_index,
+            Token::ValueString(s),
+            start_index + s.len(),
+        )))
     }
 
     fn scan_variable(&mut self, i: usize) -> Option<Spanned<Token<'input>, usize, ParseError>> {
@@ -296,6 +317,9 @@ impl<'input> Iterator for Lexer<'input> {
                     c if c == '/' && next_c == '/' => {
                         return self.scan_comment(i);
                     }
+                    '"' | '\'' => {
+                        return self.scan_quote(i, c);
+                    }
                     c if self.found_assign_op
                         && (c.is_alphanumeric() || c.is_ascii_punctuation()) =>
                     {
@@ -335,13 +359,20 @@ mod tests {
 
     #[test]
     pub fn test_scan_quote() {
-        let input = r#"  "// This is a quote""#;
+        let input = r#" v =  "// This is a quote""#;
         let mut lexer = Lexer::new(input);
-        let iter = lexer.next();
-        assert_eq!(
-            (2_usize, Token::Quote("// This is a quote"), 21_usize),
-            iter.unwrap().unwrap()
-        );
+
+        let expected_tokens = vec![
+            Token::Key("v"),
+            Token::AssignOp,
+            Token::Quote("// This is a quote"),
+        ];
+
+        check_tokens(&mut lexer, expected_tokens);
+        // assert_eq!(
+        //     (2_usize, Token::Quote("// This is a quote"), 21_usize),
+        //     iter.unwrap().unwrap()
+        // );
 
         let input = r#"  '// This is a quote'"#;
         let mut lexer = Lexer::new(input);
@@ -427,7 +458,6 @@ mod tests {
         let input = r#" ProcessConfig = MyApp // This is a "comment""#;
         let mut lexer = Lexer::new(input);
 
-        let mut i = 0;
         let expected_tokens = vec![
             Token::BlockKeyword("ProcessConfig"),
             Token::AssignOp,
@@ -435,6 +465,35 @@ mod tests {
             Token::Comment("This is a \"comment\""),
         ];
         check_tokens(&mut lexer, expected_tokens);
+
+        // TODO: Currently values allow multi-line strings if you end the line
+        // with a backslash to escape the new line
+
+        let input = r#"
+        name1 = value1 // This is a "comment"
+        name2 = value2 // Second Comment
+        name3 = this\
+        is \
+        a test\
+        of a multi-line string"#;
+        let mut lexer = Lexer::new(input);
+
+        let expected_tokens = vec![
+            Token::EOL,
+            Token::Key("name1"),
+            Token::AssignOp,
+            Token::ValueString("value1"),
+            Token::Comment("This is a \"comment\""),
+            Token::EOL,
+            Token::Key("name2"),
+            Token::AssignOp,
+            Token::ValueString("value2"),
+            Token::Comment("Second Comment"),
+        ];
+        check_tokens(&mut lexer, expected_tokens);
+        for t in lexer {
+            println!("Token: {:?}", t);
+        }
     }
 
     #[test]
@@ -462,5 +521,26 @@ mod tests {
             }
         }
         assert_eq!(i, expected_tokens.len());
+    }
+
+    // TODO: Remove this test
+    #[test]
+    fn test_iterator() {
+        let input = "name   \\=   value = real value";
+        let mut chars = input.chars();
+        let iter = chars.next();
+
+        let mut prev = '\0';
+        let pos = chars.position(|c| {
+            (c == '=' && prev != '\\') || {
+                prev = c;
+                false
+            }
+        });
+
+        let iter = chars.skip(10).next();
+
+        println!("Pos: {:?}", pos);
+        println!("Char: {:?}", iter);
     }
 }

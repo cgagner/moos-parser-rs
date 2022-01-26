@@ -1,4 +1,4 @@
-use lalrpop_util::{lalrpop_mod, ParseError};
+use lalrpop_util::lalrpop_mod;
 
 lalrpop_mod!(
     #[allow(clippy::all, dead_code, unused_imports, unused_mut)]
@@ -20,12 +20,12 @@ pub enum Line<'input> {
 #[cfg(test)]
 mod tests {
 
-    use crate::{
-        error::ParseError,
-        lexer::{Lexer, Token},
-    };
+    use crate::lexer::Lexer;
 
-    lalrpop_mod!(pub moos); // syntesized by LALRPOP
+    lalrpop_mod!(
+        #[allow(clippy::all, dead_code, unused_imports, unused_mut)]
+        pub moos
+    ); // syntesized by LALRPOP
 
     #[test]
     fn test_line_parser() {
@@ -74,6 +74,7 @@ mod tests {
           CommsTick = 4
 
           absolute_time_gap = 1   // In Seconds, Default is 4
+          log_path = "/home/user/tmp"
 
           watch_only = pHelmIvP,pMarineViewer
         }

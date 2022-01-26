@@ -18,18 +18,20 @@ pub Line: Line<'input> = {
 }
 
 BlockBegin: Line<'input> = {
-    "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"> "EOL" "{" => Line::BlockBegin(name, Some(comment)),
-    "BlockKeyword" "=" <name:"ValueString"> "EOL" "{" => Line::BlockBegin(name, None),
+    "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"?> <eol:"EOL"?> "{" =>? match eol {
+        None => Err(lalrpop_util::ParseError::User {
+            error: ParseError::new_missing_new_line()
+        }),
+        Some(_) => Ok(Line::BlockBegin(name, comment)),
+    },
 }
 
 BlockEnd: Line<'input> = {
-    "}" <comment:"Comment"> "EOL" => Line::BlockEnd(Some(comment)),
-    "}" "EOL" => Line::BlockEnd(None),
+    "}" <comment:"Comment"?> "EOL" => Line::BlockEnd(comment),
 }
 
 Define: Line<'input> = {
-    <d:"Define"> <name:"Key"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Define(name, value, Some(comment)),
-    <d:"Define"> <name:"Key"> "=" <value:"ValueString"> "EOL" => Line::Define(name, value, None),
+    <d:"Define"> <name:"Key"> "=" <value:Value> <comment:"Comment"?> "EOL" => Line::Define(name, value, comment),
 }
 
 // TODO: I'm not sure we should be parsing variables like this here...
@@ -37,10 +39,17 @@ Define: Line<'input> = {
 // later. Technically, variables could be anything. E.G.
 // export TEST="TEST=1234"
 Assignment: Line<'input> = {
-    <key:"Key"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Assignment(key,value, Some(comment)),
-    <key:"Key"> "=" <value:"ValueString"> "EOL" => Line::Assignment(key,value, None),
-    <key:"Variable"> "=" <value:"ValueString"> <comment:"Comment"> "EOL" => Line::Assignment(key,value, Some(comment)),
-    <key:"Variable"> "=" <value:"ValueString"> "EOL" => Line::Assignment(key,value, None),
+    <key:"Key"> "=" <value:Value> <comment:"Comment"?> "EOL" => Line::Assignment(key,value, comment),
+    <key:"Variable"> "=" <value:Value> <comment:"Comment"?> "EOL" => Line::Assignment(key,value, comment),
+}
+
+// TODO: The original MOOS parser treated everything after the equal sign as
+// the value. It also allowed for anything before the equal to be the key..
+// Should we match the original implementation or write something that
+// applies stricter rules. E.G. keys must be an identifier: [a-zA-Z0-9_-.]+
+Value: &'input str = {
+    <value:"ValueString"> => value,
+    <value:"Quote"> =>value,
 }
 
 extern {  
