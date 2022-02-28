@@ -28,6 +28,64 @@ mod tests {
     ); // syntesized by LALRPOP
 
     #[test]
+    fn test_block_newline_fail() {
+        let input = r#"
+        // Antler configuration  block
+        ProcessConfig = ANTLER {
+            MSBetweenLaunches = 200
+        }
+        "#;
+
+        let mut lexer = Lexer::new(input);
+
+        while let Some(Ok((_, token, _))) = lexer.next() {
+            println!("Parser Token: {:?}", token);
+        }
+
+        lexer = Lexer::new(input);
+        let result = moos::LinesParser::new().parse(input, lexer);
+        println!("Result: {:?}", result);
+
+        // This test should fail
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(
+                lalrpop_util::ParseError::User {
+                    error: crate::error::MoosParseError::new_missing_new_line(
+                        crate::lexer::Location::new(2, 31),
+                        crate::lexer::Location::new(2, 32),
+                    ),
+                },
+                e,
+            )
+        }
+    }
+
+    #[test]
+    fn test_block_newline_pass() {
+        let input = r#"
+        // Antler configuration  block
+        ProcessConfig = ANTLER 
+        {
+            MSBetweenLaunches = 200
+        }
+        "#;
+
+        let mut lexer = Lexer::new(input);
+
+        while let Some(Ok((_, token, _))) = lexer.next() {
+            println!("Parser Token: {:?}", token);
+        }
+
+        lexer = Lexer::new(input);
+        let result = moos::LinesParser::new().parse(input, lexer);
+        println!("Result: {:?}", result);
+
+        // This test should fail
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_line_parser() {
         let input = r#"
         // Test Mission File

@@ -2,7 +2,7 @@ use std::str::FromStr;
 use crate::helpers::remove_first_last;
 use crate::lexer::Token;
 use crate::parser::Line;
-use crate::error::ParseError;
+use crate::error::MoosParseError;
 
 grammar<'input>(input: &'input str);
 
@@ -18,9 +18,9 @@ pub Line: Line<'input> = {
 }
 
 BlockBegin: Line<'input> = {
-    "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"?> <eol:"EOL"?> "{" =>? match eol {
+    "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"?> <eol:"EOL"?> <l:@L> "{" <r:@R> =>? match eol {
         None => Err(lalrpop_util::ParseError::User {
-            error: ParseError::new_missing_new_line()
+            error: MoosParseError::new_missing_new_line(l, r)
         }),
         Some(_) => Ok(Line::BlockBegin(name, comment)),
     },
@@ -53,8 +53,8 @@ Value: &'input str = {
 }
 
 extern {  
-    type Location = usize;
-    type Error = ParseError;
+    type Location = crate::lexer::Location;
+    type Error = MoosParseError;
     
     enum Token<'input> {
         "(" => Token::ParenOpen, 

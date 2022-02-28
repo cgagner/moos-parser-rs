@@ -1,43 +1,45 @@
+use crate::lexer::Location;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ParseError {
-    kind: ParseErrorKind,
-    loc_start: usize,
-    loc_end: usize,
+pub struct MoosParseError {
+    kind: MoosParseErrorKind,
+    loc_start: Location,
+    loc_end: Location,
 }
 
-impl ParseError {
-    pub fn new(kind: ParseErrorKind, loc_start: usize, loc_end: usize) -> ParseError {
-        ParseError {
+impl MoosParseError {
+    pub fn new(kind: MoosParseErrorKind, loc_start: Location, loc_end: Location) -> MoosParseError {
+        MoosParseError {
             kind,
             loc_start,
             loc_end,
         }
     }
-    pub fn new_missing_trailing(c: char, loc_end: usize) -> ParseError {
-        ParseError {
-            kind: ParseErrorKind::MissingTrailing(c),
+    pub fn new_missing_trailing(c: char, loc_end: Location) -> MoosParseError {
+        MoosParseError {
+            kind: MoosParseErrorKind::MissingTrailing(c),
             loc_start: loc_end,
             loc_end: loc_end,
         }
     }
-    pub fn new_unexpected_symbol(c: char, loc_end: usize) -> ParseError {
-        ParseError {
-            kind: ParseErrorKind::UnexpectedSymbol(c),
+    pub fn new_unexpected_symbol(c: char, loc_end: Location) -> MoosParseError {
+        MoosParseError {
+            kind: MoosParseErrorKind::UnexpectedSymbol(c),
             loc_start: loc_end,
             loc_end: loc_end,
         }
     }
-    pub fn new_missing_new_line() -> ParseError {
-        ParseError {
-            kind: ParseErrorKind::MissingNewLine,
-            loc_start: 0,
-            loc_end: 0,
+    pub fn new_missing_new_line(loc_start: Location, loc_end: Location) -> MoosParseError {
+        MoosParseError {
+            kind: MoosParseErrorKind::MissingNewLine,
+            loc_start: loc_start,
+            loc_end: loc_end,
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ParseErrorKind {
+pub enum MoosParseErrorKind {
     MissingTrailing(char),
     MissingNewLine,
     InvalidConfigBlock,

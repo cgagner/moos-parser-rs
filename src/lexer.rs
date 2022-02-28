@@ -1,7 +1,27 @@
-use crate::error::ParseError;
-use std::str::CharIndices;
+use crate::error::MoosParseError;
+
+use core::cmp::max;
+use core::str::CharIndices;
 
 pub type Spanned<Token, Loc, Error> = Result<(Loc, Token, Loc), Error>;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub line: usize,
+    pub index: usize,
+}
+
+impl Location {
+    pub fn new(line: usize, index: usize) -> Self {
+        Location { line, index }
+    }
+}
+
+impl Default for Location {
+    fn default() -> Self {
+        Self { line: 0, index: 0 }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Token<'input> {
@@ -29,9 +49,12 @@ pub struct Lexer<'input> {
     chars: std::iter::Peekable<CharIndices<'input>>,
     input: &'input str,
     current: Option<(usize, char)>,
+    line_number: usize,
+    char_count: usize,
     start_of_line: bool,
     found_assign_op: bool,
     found_define_op: bool,
+    found_block_keyword: bool,
 }
 
 impl<'input> Lexer<'input> {
@@ -42,10 +65,17 @@ impl<'input> Lexer<'input> {
             chars,
             input,
             current,
+            line_number: 0,
+            char_count: 0,
             start_of_line: true,
             found_assign_op: false,
             found_define_op: false,
+            found_block_keyword: false,
         }
+    }
+    #[inline]
+    pub(crate) fn get_location(&self, index: usize) -> Location {
+        Location::new(self.line_number, max(index - self.char_count, 0))
     }
 
     #[inline]
@@ -53,6 +83,7 @@ impl<'input> Lexer<'input> {
         self.start_of_line = true;
         self.found_assign_op = false;
         self.found_define_op = false;
+        self.found_block_keyword = false;
     }
 
     #[inline]
@@ -60,7 +91,7 @@ impl<'input> Lexer<'input> {
         &mut self,
         start_index: usize,
         _: char,
-    ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         self.start_of_line = false;
         self.current = self.chars.next();
         let (identifier, end_index) = loop {
@@ -83,22 +114,27 @@ impl<'input> Lexer<'input> {
             if let Some((j, ':')) = self.current {
                 self.found_define_op = true;
                 self.current = self.chars.next();
-                return Some(Ok((start_index, Token::DefineKeyword, j)));
+                return Some(Ok((
+                    self.get_location(start_index),
+                    Token::DefineKeyword,
+                    self.get_location(j),
+                )));
             } else {
                 // TODO: Error
             }
         } else if identifier.eq_ignore_ascii_case("processconfig") {
+            self.found_block_keyword = true;
             return Some(Ok((
-                start_index,
+                self.get_location(start_index),
                 Token::BlockKeyword(&self.input[start_index..end_index]),
-                end_index,
+                self.get_location(end_index),
             )));
         }
 
         Some(Ok((
-            start_index,
+            self.get_location(start_index),
             Token::Key(&self.input[start_index..end_index]),
-            end_index,
+            self.get_location(end_index),
         )))
     }
 
@@ -107,7 +143,7 @@ impl<'input> Lexer<'input> {
         &mut self,
         i: usize,
         quote: char,
-    ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         self.current = self.chars.next();
         while let Some((j, c)) = self.current {
             self.current = self.chars.next();
@@ -117,18 +153,25 @@ impl<'input> Lexer<'input> {
                     self.current = self.chars.next()
                 }
             } else if c == quote {
-                return Some(Ok((i, Token::Quote(&self.input[i + 1..j]), j)));
+                return Some(Ok((
+                    self.get_location(i),
+                    Token::Quote(&self.input[i + 1..j]),
+                    self.get_location(j),
+                )));
             } else if c == '\n' {
                 self.handle_new_line();
                 // The original mission format didn't allow multi-line strings
                 // so we'll do the same here.
                 // @TODO: Report an error "missing trailing `'`
-                return Some(Err(ParseError::new_missing_trailing(quote, j)));
+                return Some(Err(MoosParseError::new_missing_trailing(
+                    quote,
+                    self.get_location(j),
+                )));
             }
         }
-        Some(Err(ParseError::new_missing_trailing(
+        Some(Err(MoosParseError::new_missing_trailing(
             quote,
-            self.input.len(),
+            self.get_location(self.input.len()),
         )))
     }
 
@@ -136,7 +179,7 @@ impl<'input> Lexer<'input> {
     fn scan_comment(
         &mut self,
         start_index: usize,
-    ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         self.current = self.chars.next();
 
         if let Some((_, '/')) = self.current {
@@ -164,9 +207,9 @@ impl<'input> Lexer<'input> {
                 '\n' => {
                     self.handle_new_line();
                     return Some(Ok((
-                        start_index,
+                        self.get_location(start_index),
                         Token::Comment(&self.input[start_index + skip_start..j]),
-                        j,
+                        self.get_location(j),
                     )));
                 }
                 _ => {}
@@ -175,9 +218,9 @@ impl<'input> Lexer<'input> {
         }
         let j = self.input.len();
         Some(Ok((
-            start_index,
+            self.get_location(start_index),
             Token::Comment(&self.input[start_index + skip_start..j]),
-            j,
+            self.get_location(j),
         )))
     }
 
@@ -186,16 +229,16 @@ impl<'input> Lexer<'input> {
         &mut self,
         i: usize,
         token: Token<'input>,
-    ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         self.current = self.chars.next();
-        Some(Ok((i, token, i + 1)))
+        Some(Ok((self.get_location(i), token, self.get_location(i + 1))))
     }
 
     #[inline]
     fn scan_value(
         &mut self,
         start_index: usize,
-    ) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         let (s, end_index) = loop {
             match self.current {
                 None => break (&self.input[start_index..], self.input.len()),
@@ -234,6 +277,10 @@ impl<'input> Lexer<'input> {
                     '\n' => {
                         break (&self.input[start_index..j], j);
                     }
+                    c if self.found_block_keyword && c == '{' => {
+                        self.handle_new_line();
+                        break (&self.input[start_index..j], j);
+                    }
                     _ => {
                         self.current = self.chars.next();
                     }
@@ -242,13 +289,16 @@ impl<'input> Lexer<'input> {
         };
         let s = s.trim_end();
         Some(Ok((
-            start_index,
+            self.get_location(start_index),
             Token::ValueString(s),
-            start_index + s.len(),
+            self.get_location(start_index + s.len()),
         )))
     }
 
-    fn scan_variable(&mut self, i: usize) -> Option<Spanned<Token<'input>, usize, ParseError>> {
+    fn scan_variable(
+        &mut self,
+        i: usize,
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         self.current = self.chars.next();
 
         if let Some((_, '{')) = self.current {
@@ -265,21 +315,31 @@ impl<'input> Lexer<'input> {
                     self.current = self.chars.next()
                 }
             } else if c == '}' {
-                return Some(Ok((i, Token::Variable(&self.input[i + 2..j]), j)));
+                return Some(Ok((
+                    self.get_location(i),
+                    Token::Variable(&self.input[i + 2..j]),
+                    self.get_location(j),
+                )));
             } else if c == '\n' {
                 self.handle_new_line();
                 // The original mission format didn't allow multi-line strings
                 // so we'll do the same here.
                 // @TODO: Report an error "missing trailing `'`
-                return Some(Err(ParseError::new_missing_trailing('}', j)));
+                return Some(Err(MoosParseError::new_missing_trailing(
+                    '}',
+                    self.get_location(j),
+                )));
             }
         }
-        Some(Err(ParseError::new_missing_trailing('}', self.input.len())))
+        Some(Err(MoosParseError::new_missing_trailing(
+            '}',
+            self.get_location(self.input.len()),
+        )))
     }
 }
 
 impl<'input> Iterator for Lexer<'input> {
-    type Item = Spanned<Token<'input>, usize, ParseError>;
+    type Item = Spanned<Token<'input>, Location, MoosParseError>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let next_c = self.chars.peek().unwrap_or(&(0, '\0')).1;
@@ -300,15 +360,20 @@ impl<'input> Iterator for Lexer<'input> {
                     '\n' => {
                         self.handle_new_line();
                         self.current = self.chars.next();
-                        // After a new line, consume all of the next new lines
-                        // and spaces
+                        // After a new line, consume all of the next spaces
                         while let Some((_, c)) = self.current {
                             match c {
-                                ' ' | '\r' | '\t' | '\n' => self.current = self.chars.next(),
+                                ' ' | '\r' | '\t' => self.current = self.chars.next(),
                                 _ => break,
                             }
                         }
-                        return Some(Ok((i, Token::EOL, i)));
+                        let result =
+                            Some(Ok((self.get_location(i), Token::EOL, self.get_location(i))));
+
+                        // Store the current line count and char count
+                        self.line_number += 1;
+                        self.char_count = i + 1;
+                        return result;
                     }
                     c if (self.start_of_line || self.found_define_op) && c.is_alphanumeric() => {
                         self.start_of_line = false;
@@ -339,7 +404,12 @@ impl<'input> Iterator for Lexer<'input> {
                         self.found_assign_op = true;
                         return self.scan_char(i, Token::AssignOp);
                     }
-                    c => return Some(Err(ParseError::new_unexpected_symbol(c, i))),
+                    c => {
+                        return Some(Err(MoosParseError::new_unexpected_symbol(
+                            c,
+                            self.get_location(i),
+                        )))
+                    }
                 },
             }
             self.current = self.chars.next();
@@ -353,8 +423,8 @@ impl<'input> Iterator for Lexer<'input> {
 mod tests {
 
     use crate::{
-        error::ParseError,
-        lexer::{Lexer, Token},
+        error::MoosParseError,
+        lexer::{Lexer, Location, Token},
     };
 
     #[test]
@@ -378,7 +448,11 @@ mod tests {
         let mut lexer = Lexer::new(input);
         let iter = lexer.next();
         assert_eq!(
-            (2_usize, Token::Quote("// This is a quote"), 21_usize),
+            (
+                Location::new(0, 2),
+                Token::Quote("// This is a quote"),
+                Location::new(0, 21)
+            ),
             iter.unwrap().unwrap()
         );
 
@@ -387,18 +461,25 @@ mod tests {
         let iter = lexer.next();
         assert_eq!(
             (
-                2_usize,
+                Location::new(0, 2),
                 Token::Quote("// Check multi-line string"),
-                29_usize
+                Location::new(0, 29),
             ),
             iter.unwrap().unwrap()
         );
 
         let iter = lexer.next();
-        assert_eq!((30_usize, Token::EOL, 30_usize), iter.unwrap().unwrap());
+        assert_eq!(
+            (Location::new(0, 30), Token::EOL, Location::new(0, 30)),
+            iter.unwrap().unwrap()
+        );
         let iter = lexer.next();
         assert_eq!(
-            (31_usize, Token::Quote("Another quote"), 45_usize),
+            (
+                Location::new(1, 0),
+                Token::Quote("Another quote"),
+                Location::new(1, 14),
+            ),
             iter.unwrap().unwrap()
         );
 
@@ -410,7 +491,10 @@ mod tests {
         assert!(iter.unwrap().is_err());
 
         if let Err(e) = iter.unwrap() {
-            assert_eq!(e, ParseError::new_missing_trailing('"', input.len()))
+            assert_eq!(
+                e,
+                MoosParseError::new_missing_trailing('"', Location::new(0, input.len()))
+            )
         }
 
         // Test when the quote is there is a new line before the next quote
@@ -420,7 +504,10 @@ mod tests {
         assert!(iter.is_some());
         assert!(iter.unwrap().is_err());
         if let Err(e) = iter.unwrap() {
-            assert_eq!(e, ParseError::new_missing_trailing('"', input.len() - 1))
+            assert_eq!(
+                e,
+                MoosParseError::new_missing_trailing('"', Location::new(0, input.len() - 1))
+            )
         }
 
         // Test when the quote is the last line
@@ -431,7 +518,10 @@ mod tests {
         assert!(iter.unwrap().is_err());
 
         if let Err(e) = iter.unwrap() {
-            assert_eq!(e, ParseError::new_missing_trailing('\'', input.len()))
+            assert_eq!(
+                e,
+                MoosParseError::new_missing_trailing('\'', Location::new(0, input.len()))
+            )
         }
 
         // Test when the quote is there is a new line before the next quote
@@ -441,7 +531,10 @@ mod tests {
         assert!(iter.is_some());
         assert!(iter.unwrap().is_err());
         if let Err(e) = iter.unwrap() {
-            assert_eq!(e, ParseError::new_missing_trailing('\'', input.len() - 1))
+            assert_eq!(
+                e,
+                MoosParseError::new_missing_trailing('\'', Location::new(0, input.len() - 1))
+            )
         }
     }
 
@@ -451,7 +544,11 @@ mod tests {
         let mut lexer = Lexer::new(input);
         let iter = lexer.next();
         assert_eq!(
-            (2_usize, Token::Comment("This is a \"comment\""), 24_usize),
+            (
+                Location::new(0, 2),
+                Token::Comment("This is a \"comment\""),
+                Location::new(0, 24),
+            ),
             iter.unwrap().unwrap()
         );
 
