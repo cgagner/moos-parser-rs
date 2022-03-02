@@ -45,7 +45,12 @@ pub enum Token<'input> {
     // Variable
 }
 
-pub struct Lexer<'input> {
+pub trait TokenListener {
+    fn handle_token(&mut self, token: &Token, start_loc: &Location, end_loc: &Location);
+}
+
+pub struct Lexer<'input, 'listen> {
+    token_listeners: Vec<&'listen mut dyn TokenListener>,
     chars: std::iter::Peekable<CharIndices<'input>>,
     input: &'input str,
     current: Option<(usize, char)>,
@@ -57,11 +62,12 @@ pub struct Lexer<'input> {
     found_block_keyword: bool,
 }
 
-impl<'input> Lexer<'input> {
+impl<'input, 'listen> Lexer<'input, 'listen> {
     pub fn new(input: &'input str) -> Self {
         let mut chars = input.char_indices().peekable();
         let current = chars.next();
         Lexer {
+            token_listeners: vec![],
             chars,
             input,
             current,
@@ -73,6 +79,15 @@ impl<'input> Lexer<'input> {
             found_block_keyword: false,
         }
     }
+
+    pub fn add_listener(&mut self, token_listener: &'listen mut dyn TokenListener) {
+        self.token_listeners.push(token_listener);
+    }
+
+    pub fn clear_listeners(&mut self) {
+        self.token_listeners.clear();
+    }
+
     #[inline]
     pub(crate) fn get_location(&self, index: usize) -> Location {
         Location::new(self.line_number, max(index - self.char_count, 0))
@@ -336,11 +351,8 @@ impl<'input> Lexer<'input> {
             self.get_location(self.input.len()),
         )))
     }
-}
 
-impl<'input> Iterator for Lexer<'input> {
-    type Item = Spanned<Token<'input>, Location, MoosParseError>;
-    fn next(&mut self) -> Option<Self::Item> {
+    fn _next(&mut self) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         loop {
             let next_c = self.chars.peek().unwrap_or(&(0, '\0')).1;
             match self.current {
@@ -417,15 +429,28 @@ impl<'input> Iterator for Lexer<'input> {
     }
 }
 
+impl<'input, 'listen> Iterator for Lexer<'input, 'listen> {
+    type Item = Spanned<Token<'input>, Location, MoosParseError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let rtn = self._next();
+
+        for listener in &mut self.token_listeners {
+            if let Some(Ok((start_loc, token, end_loc))) = rtn {
+                listener.handle_token(&token, &start_loc, &end_loc);
+            }
+        }
+        return rtn;
+    }
+}
 // ----------------------------------------------------------------------------
 // Tests
 #[cfg(test)]
 mod tests {
-
     use crate::{
         error::MoosParseError,
-        lexer::{Lexer, Location, Token},
+        lexer::{Lexer, Location, Token, TokenListener},
     };
+    use log;
 
     #[test]
     pub fn test_scan_quote() {
@@ -639,5 +664,79 @@ mod tests {
 
         println!("Pos: {:?}", pos);
         println!("Char: {:?}", iter);
+    }
+    #[test]
+    fn test_listener() {
+        use crate::moos;
+        #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+        struct SemanticToken {
+            token_type: i32,
+            modifier: i32,
+            start_loc: Location,
+            end_loc: Location,
+        }
+
+        struct TokenCollector {
+            tokens: Vec<SemanticToken>,
+        }
+
+        impl TokenListener for TokenCollector {
+            fn handle_token(&mut self, token: &Token, start_loc: &Location, end_loc: &Location) {
+                match token {
+                    Token::Comment(_comment) => {
+                        self.tokens.push(SemanticToken {
+                            token_type: 0,
+                            modifier: 1,
+                            start_loc: *start_loc,
+                            end_loc: *end_loc,
+                        });
+                    }
+                    Token::BlockKeyword(keyword) => {
+                        self.tokens.push(SemanticToken {
+                            token_type: 3,
+                            modifier: 5,
+                            start_loc: *start_loc,
+                            end_loc: *end_loc,
+                        });
+                    }
+                    _ => {
+                        log::debug!("Unhandled token: {:?}", token)
+                    }
+                }
+            }
+        }
+
+        let input = r#"
+        //------------------------------------------
+        // uMemWatch config block
+
+        ProcessConfig = uMemWatch
+        {
+          AppTick   = $(POP) // Test
+          CommsTick = 4
+
+          absolute_time_gap = 1   // In Seconds, Default is 4
+          log_path = "/home/user/tmp"
+
+          watch_only = pHelmIvP,pMarineViewer
+        }
+        "#;
+
+        let mut token_collector = TokenCollector { tokens: vec![] };
+
+        let mut lexer = Lexer::new(input);
+        lexer.add_listener(&mut token_collector);
+
+        while let Some(Ok((_, token, _))) = lexer.next() {
+            println!("Parser Token: {:?}", token);
+        }
+
+        lexer = Lexer::new(input);
+        let result = moos::LinesParser::new().parse(input, lexer);
+        assert!(result.is_ok());
+        println!("Tokens: ");
+        for t in &token_collector.tokens {
+            println!("  {:?}", t);
+        }
     }
 }
