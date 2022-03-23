@@ -732,7 +732,8 @@ mod tests {
         }
 
         lexer = Lexer::new(input);
-        let result = moos::LinesParser::new().parse(input, lexer);
+        let mut errors = Vec::new();
+        let result = moos::LinesParser::new().parse(&mut errors, input, lexer);
         assert!(result.is_ok());
         println!("Tokens: ");
         for t in &token_collector.tokens {

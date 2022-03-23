@@ -1,10 +1,12 @@
 use std::str::FromStr;
 use crate::helpers::remove_first_last;
-use crate::lexer::Token;
+use crate::lexer::{Location, Token};
 use crate::parser::Line;
 use crate::error::MoosParseError;
+use lalrpop_util::ErrorRecovery;
 
-grammar<'input>(input: &'input str);
+//grammar<'input>(input: &'input str);
+grammar<'err, 'input>(errors: &'err mut Vec<ErrorRecovery<Location, Token<'input>, MoosParseError>>, input: &'input str);
 
 pub Lines: Vec<Line<'input>> = <Line*>;
 
@@ -15,13 +17,24 @@ pub Line: Line<'input> = {
     Assignment => <>,
     "EOL" => Line::EndOfLine,
     <comment:"Comment"> => Line::Comment(comment),
+    ! => { errors.push(<>); Line::Error },
 }
 
 BlockBegin: Line<'input> = {
     "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"?> <eol:"EOL"?> <l:@L> "{" <r:@R> =>? match eol {
-        None => Err(lalrpop_util::ParseError::User {
-            error: MoosParseError::new_missing_new_line(l, r)
-        }),
+        //None => Err(lalrpop_util::ParseError::User {
+        //    error: MoosParseError::new_missing_new_line(l, r)
+        //}),
+        None => {
+            let e = lalrpop_util::ErrorRecovery { 
+                error: lalrpop_util::ParseError::User {
+                    error: MoosParseError::new_missing_new_line(l, r)
+                },
+                dropped_tokens: vec![]
+            };
+            errors.push(e);
+            Ok(Line::Error)
+        }
         Some(_) => Ok(Line::BlockBegin(name, comment)),
     },
 }
