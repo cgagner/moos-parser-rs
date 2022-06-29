@@ -4,15 +4,25 @@ use lalrpop_util::ErrorRecovery;
 lalrpop_mod!(
     #[allow(clippy::all, dead_code, unused_imports, unused_mut)]
     pub moos
-); // syntesized by LALRPOP
+); // synthesized by LALRPOP
+
+#[derive(Debug)]
+pub enum Value<'input> {
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    String(&'input str),
+}
 
 #[derive(Debug)]
 pub enum Line<'input> {
     Comment(&'input str),
-    Define(&'input str, &'input str, Option<&'input str>),
+    Define(&'input str, Value<'input>, Option<&'input str>),
     BlockBegin(&'input str, Option<&'input str>),
     BlockEnd(Option<&'input str>),
-    Assignment(&'input str, &'input str, Option<&'input str>),
+    // TODO: Need to update the assignment to take a variant for the value
+    Assignment(&'input str, Value<'input>, Option<&'input str>),
+    Integer(i64),
     Error,
     EndOfLine,
 }

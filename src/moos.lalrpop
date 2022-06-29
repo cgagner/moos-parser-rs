@@ -15,6 +15,7 @@ pub Line: Line<'input> = {
     BlockBegin => <>,
     BlockEnd => <>,
     Assignment => <>,
+    Integer => <>,
     "EOL" => Line::EndOfLine,
     <comment:"Comment"> => Line::Comment(comment),
     ! => { errors.push(<>); Line::Error },
@@ -60,9 +61,16 @@ Assignment: Line<'input> = {
 // the value. It also allowed for anything before the equal to be the key..
 // Should we match the original implementation or write something that
 // applies stricter rules. E.G. keys must be an identifier: [a-zA-Z0-9_-.]+
-Value: &'input str = {
-    <value:"ValueString"> => value,
-    <value:"Quote"> =>value,
+Value: crate::parser::Value<'input> = {
+    <value:"bool"> => crate::parser::Value::Boolean(value),
+    <value:"int"> => crate::parser::Value::Integer(value),
+    <value:"float"> => crate::parser::Value::Float(value),
+    <value:"ValueString"> => crate::parser::Value::String(value),
+    <value:"Quote"> => crate::parser::Value::String(value),
+}
+
+Integer: Line<'input> = {
+    <value:"int"> => Line::Integer(value),
 }
 
 extern {  
@@ -75,13 +83,18 @@ extern {
         "=" => Token::AssignOp,
         "Comment" => Token::Comment(<&'input str>),
         "Quote" => Token::Quote(<&'input str>),
+        "PartialQuote" => Token::PartialQuote(<&'input str>, <char>),
         "Define" => Token::DefineKeyword,
         "BlockKeyword" => Token::BlockKeyword(<&'input str>),
         "Key" => Token::Key(<&'input str>),
         "ValueString" => Token::ValueString(<&'input str>),
         "EOL" => Token::EOL,
         "Variable" => Token::Variable(<&'input str>),
+        "PartialVariable" => Token::PartialVariable(<&'input str>, <char>),
         "{" => Token::CurlyOpen,
         "}" => Token::CurlyClose,
+        "int" => Token::Integer(<i64>),
+        "float" => Token::Float(<f64>),
+        "bool" => Token::Boolean(<bool>),
     }
 }

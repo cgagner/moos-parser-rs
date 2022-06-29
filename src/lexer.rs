@@ -1,7 +1,9 @@
 use crate::error::MoosParseError;
 
 use core::cmp::max;
-use core::str::CharIndices;
+use core::str;
+use core::str::{CharIndices, ParseBoolError};
+use std::num::{ParseFloatError, ParseIntError};
 
 pub type Spanned<Token, Loc, Error> = Result<(Loc, Token, Loc), Error>;
 
@@ -27,6 +29,7 @@ impl Default for Location {
 pub enum Token<'input> {
     Comment(&'input str),
     Quote(&'input str),
+    PartialQuote(&'input str, char),
     Key(&'input str),
     Boolean(bool),
     Integer(i64),
@@ -40,8 +43,10 @@ pub enum Token<'input> {
     BlockKeyword(&'input str),
     ValueString(&'input str),
     Variable(&'input str),
+    PartialVariable(&'input str, char),
     EOL,
     EOF,
+    Space,
     // Variable
 }
 
@@ -160,13 +165,18 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         quote: char,
     ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
         self.current = self.chars.next();
+
         while let Some((j, c)) = self.current {
-            self.current = self.chars.next();
+            // Only move the iterator if we haven't reached a new line
+            if c != '\n' {
+                self.current = self.chars.next();
+            }
             if c == '\\' {
                 // Take an extra char for escape characters
                 if let Some((_, _)) = self.current {
                     self.current = self.chars.next()
                 }
+                continue;
             } else if c == quote {
                 return Some(Ok((
                     self.get_location(i),
@@ -177,15 +187,16 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                 self.handle_new_line();
                 // The original mission format didn't allow multi-line strings
                 // so we'll do the same here.
-                // @TODO: Report an error "missing trailing `'`
-                return Some(Err(MoosParseError::new_missing_trailing(
-                    quote,
+                return Some(Ok((
+                    self.get_location(i),
+                    Token::PartialQuote(&self.input[i + 1..j], quote),
                     self.get_location(j),
                 )));
             }
         }
-        Some(Err(MoosParseError::new_missing_trailing(
-            quote,
+        Some(Ok((
+            self.get_location(i),
+            Token::PartialQuote(&self.input[i + 1..], quote),
             self.get_location(self.input.len()),
         )))
     }
@@ -254,7 +265,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         &mut self,
         start_index: usize,
     ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
-        let (s, end_index) = loop {
+        let (s, _end_index) = loop {
             match self.current {
                 None => break (&self.input[start_index..], self.input.len()),
                 Some((j, c)) => match c {
@@ -263,15 +274,19 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         // TODO: Should we skip escaped new lines? The
                         // original parser did not
                         self.current = self.chars.next();
-                        println!("Skipping escape");
+                        log::trace!("Skipping escape");
                         // Take an extra char for escape characters
                         if let Some((_, cc)) = self.current {
-                            println!("Skipping escape: {}", cc);
+                            log::trace!("Skipping escape: {}", cc);
                             self.current = self.chars.next()
                         }
                     }
 
-                    // Handle Quotes
+                    // NOTE: I don't think we care about quotes here. If a
+                    // quote mark is in the middle of a value string, just
+                    // treat the whole thing as a string...
+                    //
+                    // // Handle Quotes
                     '"' | '\'' => {
                         let result = self.scan_quote(j, c);
                         if let Some(Err(e)) = result {
@@ -290,6 +305,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                     }
                     // Handle New Lines
                     '\n' => {
+                        // TODO: Need to verify this does NOT consume EOL
                         break (&self.input[start_index..j], j);
                     }
                     c if self.found_block_keyword && c == '{' => {
@@ -297,6 +313,69 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         break (&self.input[start_index..j], j);
                     }
                     _ => {
+                        // Handle special cases
+                        let next_whitespace = {
+                            if let Some(v) = self.input[start_index..]
+                                .char_indices()
+                                .find(|&(_index, c)| c == ' ' || c == '\t' || c == '\n')
+                            {
+                                (v.0 + start_index, v.1)
+                            } else {
+                                (self.input.len(), '\0')
+                            }
+                        };
+
+                        // Create a closure that will advance the iterator to
+                        // the next whitespace.s
+                        let advance_to_whitespace = |s: &mut Self| {
+                            // Iterate forward to the next_whitespace
+                            let current = loop {
+                                if let Some((ii, cc)) = s.chars.next() {
+                                    if ii == next_whitespace.0 {
+                                        break Some((ii, cc));
+                                    }
+                                } else {
+                                    break None;
+                                }
+                            };
+
+                            if next_whitespace.1 != '\n' {
+                                s.current = s.chars.next();
+                            } else {
+                                s.current = current;
+                                s.handle_new_line();
+                            }
+                        };
+
+                        if let Ok(value) =
+                            Self::scan_integer(&self.input[start_index..next_whitespace.0])
+                        {
+                            advance_to_whitespace(self);
+                            return Some(Ok((
+                                self.get_location(start_index),
+                                Token::Integer(value),
+                                self.get_location(next_whitespace.0),
+                            )));
+                        } else if let Ok(value) =
+                            Self::scan_float(&self.input[start_index..next_whitespace.0])
+                        {
+                            advance_to_whitespace(self);
+                            return Some(Ok((
+                                self.get_location(start_index),
+                                Token::Float(value),
+                                self.get_location(next_whitespace.0),
+                            )));
+                        } else if let Ok(value) =
+                            Self::scan_bool(&self.input[start_index..next_whitespace.0])
+                        {
+                            advance_to_whitespace(self);
+                            return Some(Ok((
+                                self.get_location(start_index),
+                                Token::Boolean(value),
+                                self.get_location(next_whitespace.0),
+                            )));
+                        }
+
                         self.current = self.chars.next();
                     }
                 },
@@ -323,7 +402,10 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         }
 
         while let Some((j, c)) = self.current {
-            self.current = self.chars.next();
+            // Only move the iterator if we haven't reached a new line
+            if c != '\n' {
+                self.current = self.chars.next();
+            }
             if c == '\\' {
                 // Take an extra char for escape characters
                 if let Some((_, _)) = self.current {
@@ -339,17 +421,74 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                 self.handle_new_line();
                 // The original mission format didn't allow multi-line strings
                 // so we'll do the same here.
-                // @TODO: Report an error "missing trailing `'`
-                return Some(Err(MoosParseError::new_missing_trailing(
-                    '}',
+                return Some(Ok((
+                    self.get_location(i),
+                    Token::PartialVariable(&self.input[i + 2..j], '}'),
                     self.get_location(j),
                 )));
             }
         }
-        Some(Err(MoosParseError::new_missing_trailing(
-            '}',
+        Some(Ok((
+            self.get_location(i),
+            Token::PartialVariable(&self.input[i + 2..], '}'),
             self.get_location(self.input.len()),
         )))
+    }
+
+    #[inline]
+    fn is_number_digit(c: char) -> bool {
+        match c {
+            '-' | '+' => true,
+            '0'..='9' => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    fn is_number_start(c: char, next_c: char) -> bool {
+        match c {
+            '-' | '+' | '0'..='9' => {}
+            _ => return false,
+        }
+
+        return true;
+    }
+
+    /// Scan a string for an integer. This method handles regular integers
+    /// as well as integers encoded as hex, binary, or octal.
+    fn scan_integer(s: &str) -> Result<i64, ParseIntError> {
+        let mut chars = s.chars().peekable();
+
+        if s.len() > 2 && chars.nth(0).unwrap_or('\0') == '0' {
+            match chars.peek() {
+                Some('x') | Some('X') => return i64::from_str_radix(&s[2..], 16),
+                Some('b') | Some('B') => return i64::from_str_radix(&s[2..], 2),
+                Some('o') | Some('O') => return i64::from_str_radix(&s[2..], 8),
+                _ => {}
+            }
+        }
+        s.parse::<i64>()
+    }
+
+    /// Scan a string for a float.
+    fn scan_float(s: &str) -> Result<f64, ParseFloatError> {
+        if s.eq_ignore_ascii_case("nan") {
+            println!("scan_float: {}", s);
+            Ok(f64::NAN)
+        } else {
+            s.parse::<f64>()
+        }
+    }
+
+    // Scan a string for a boolean.
+    fn scan_bool(s: &str) -> Result<bool, ()> {
+        if s.eq_ignore_ascii_case("true") {
+            Ok(true)
+        } else if s.eq_ignore_ascii_case("false") {
+            Ok(false)
+        } else {
+            Err(())
+        }
     }
 
     fn _next(&mut self) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
@@ -397,6 +536,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                     '"' | '\'' => {
                         return self.scan_quote(i, c);
                     }
+
                     c if self.found_assign_op
                         && (c.is_alphanumeric() || c.is_ascii_punctuation()) =>
                     {
@@ -416,11 +556,63 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         self.found_assign_op = true;
                         return self.scan_char(i, Token::AssignOp);
                     }
-                    c => {
+                    _ => {
+                        // Handle special cases
+                        let next_whitespace = self.input[i..]
+                            .char_indices()
+                            .find(|&(_index, c)| c == ' ' || c == '\t' || c == '\n')
+                            .unwrap_or((self.input.len() - 1, '\0'))
+                            .0
+                            + i;
+
+                        if let Ok(value) = Self::scan_integer(&self.input[i..next_whitespace]) {
+                            // Iterate forward to the next_whitespace
+                            while let Some((ii, cc)) = self.chars.next() {
+                                if ii == next_whitespace {
+                                    break;
+                                }
+                            }
+                            self.current = self.chars.next();
+                            return Some(Ok((
+                                self.get_location(i),
+                                Token::Integer(value),
+                                self.get_location(next_whitespace),
+                            )));
+                        } else if let Ok(value) = Self::scan_float(&self.input[i..next_whitespace])
+                        {
+                            // Iterate forward to the next_whitespace
+                            while let Some((ii, cc)) = self.chars.next() {
+                                if ii == next_whitespace {
+                                    break;
+                                }
+                            }
+                            self.current = self.chars.next();
+                            return Some(Ok((
+                                self.get_location(i),
+                                Token::Float(value),
+                                self.get_location(next_whitespace),
+                            )));
+                        } else if let Ok(value) = Self::scan_bool(&self.input[i..next_whitespace]) {
+                            // Iterate forward to the next_whitespace
+                            while let Some((ii, cc)) = self.chars.next() {
+                                if ii == next_whitespace {
+                                    break;
+                                }
+                            }
+                            self.current = self.chars.next();
+                            return Some(Ok((
+                                self.get_location(i),
+                                Token::Boolean(value),
+                                self.get_location(next_whitespace),
+                            )));
+                        }
+
+                        // TODO: Not sure we should be returning an error here
+                        // This should probably just return a the entire string
                         return Some(Err(MoosParseError::new_unexpected_symbol(
                             c,
                             self.get_location(i),
-                        )))
+                        )));
                     }
                 },
             }
@@ -464,6 +656,7 @@ mod tests {
         ];
 
         check_tokens(&mut lexer, expected_tokens);
+
         // assert_eq!(
         //     (2_usize, Token::Quote("// This is a quote"), 21_usize),
         //     iter.unwrap().unwrap()
@@ -509,58 +702,151 @@ mod tests {
         );
 
         // Test when the quote is the last line
-        let input = "  \"// This is a quote";
+        let input = "  \"// This is a partial quote";
         let mut lexer = Lexer::new(input);
         let iter = lexer.next();
         assert!(iter.is_some());
-        assert!(iter.unwrap().is_err());
+        // This is no longer an error. It should be a partial quote
+        assert!(!iter.unwrap().is_err());
 
-        if let Err(e) = iter.unwrap() {
-            assert_eq!(
-                e,
-                MoosParseError::new_missing_trailing('"', Location::new(0, input.len()))
-            )
-        }
+        println!("Partial Quote: {:?}", iter.unwrap().unwrap());
+        assert_eq!(
+            (
+                Location::new(0, 2),
+                Token::PartialQuote("// This is a partial quote", '"'),
+                Location::new(0, input.len()),
+            ),
+            iter.unwrap().unwrap()
+        );
 
         // Test when the quote is there is a new line before the next quote
-        let input = "  \"// This is a quote\n";
+        let input = "  \"// This is a partial quote\n";
         let mut lexer = Lexer::new(input);
         let iter = lexer.next();
         assert!(iter.is_some());
-        assert!(iter.unwrap().is_err());
-        if let Err(e) = iter.unwrap() {
-            assert_eq!(
-                e,
-                MoosParseError::new_missing_trailing('"', Location::new(0, input.len() - 1))
-            )
-        }
+        assert!(!iter.unwrap().is_err());
+
+        assert_eq!(
+            (
+                Location::new(0, 2),
+                Token::PartialQuote("// This is a partial quote", '"'),
+                Location::new(0, input.len() - 1),
+            ),
+            iter.unwrap().unwrap()
+        );
+
+        let iter = lexer.next();
+        assert_eq!(
+            (Location::new(0, 29), Token::EOL, Location::new(0, 29)),
+            iter.unwrap().unwrap()
+        );
+
+        println!("After test: {:?}", iter.unwrap().unwrap());
 
         // Test when the quote is the last line
-        let input = "  '// This is a quote";
+        let input = "  '// This is a partial quote";
         let mut lexer = Lexer::new(input);
         let iter = lexer.next();
         assert!(iter.is_some());
-        assert!(iter.unwrap().is_err());
+        assert!(!iter.unwrap().is_err());
 
-        if let Err(e) = iter.unwrap() {
-            assert_eq!(
-                e,
-                MoosParseError::new_missing_trailing('\'', Location::new(0, input.len()))
-            )
-        }
+        assert_eq!(
+            (
+                Location::new(0, 2),
+                Token::PartialQuote("// This is a partial quote", '\''),
+                Location::new(0, input.len()),
+            ),
+            iter.unwrap().unwrap()
+        );
 
         // Test when the quote is there is a new line before the next quote
-        let input = "  '// This is a quote\n";
+        let input = "  '// This is a partial quote\n";
         let mut lexer = Lexer::new(input);
         let iter = lexer.next();
         assert!(iter.is_some());
-        assert!(iter.unwrap().is_err());
-        if let Err(e) = iter.unwrap() {
-            assert_eq!(
-                e,
-                MoosParseError::new_missing_trailing('\'', Location::new(0, input.len() - 1))
-            )
-        }
+        assert!(!iter.unwrap().is_err());
+
+        assert_eq!(
+            (
+                Location::new(0, 2),
+                Token::PartialQuote("// This is a partial quote", '\''),
+                Location::new(0, input.len() - 1),
+            ),
+            iter.unwrap().unwrap()
+        );
+    }
+
+    #[test]
+    pub fn test_scan_variable() {
+        let input = "${MY_VAR}";
+        let mut lexer = Lexer::new(input);
+
+        let expected_tokens = vec![Token::Variable("MY_VAR")];
+
+        check_tokens(&mut lexer, expected_tokens);
+
+        let input = "${MY_VAR}\n";
+        let mut lexer = Lexer::new(input);
+
+        let expected_tokens = vec![Token::Variable("MY_VAR"), Token::EOL];
+
+        check_tokens(&mut lexer, expected_tokens);
+
+        let input = "${THIS_is_a_VARIABLE}\n";
+        let mut lexer = Lexer::new(input);
+        let iter = lexer.next();
+        assert_eq!(
+            (
+                Location::new(0, 0),
+                Token::Variable("THIS_is_a_VARIABLE"),
+                Location::new(0, 20)
+            ),
+            iter.unwrap().unwrap()
+        );
+        let iter = lexer.next();
+        assert_eq!(
+            (
+                Location::new(0, input.len() - 1),
+                Token::EOL,
+                Location::new(0, input.len() - 1)
+            ),
+            iter.unwrap().unwrap()
+        );
+        // Test Partial Variables
+        let input = "${MY_VAR";
+        let mut lexer = Lexer::new(input);
+
+        let expected_tokens = vec![Token::PartialVariable("MY_VAR", '}')];
+
+        check_tokens(&mut lexer, expected_tokens);
+
+        let input = "${MY_VAR\n";
+        let mut lexer = Lexer::new(input);
+
+        let expected_tokens = vec![Token::PartialVariable("MY_VAR", '}'), Token::EOL];
+
+        check_tokens(&mut lexer, expected_tokens);
+
+        let input = "${THIS_is_a_VARIABLE\n";
+        let mut lexer = Lexer::new(input);
+        let iter = lexer.next();
+        assert_eq!(
+            (
+                Location::new(0, 0),
+                Token::PartialVariable("THIS_is_a_VARIABLE", '}'),
+                Location::new(0, 20)
+            ),
+            iter.unwrap().unwrap()
+        );
+        let iter = lexer.next();
+        assert_eq!(
+            (
+                Location::new(0, input.len() - 1),
+                Token::EOL,
+                Location::new(0, input.len() - 1)
+            ),
+            iter.unwrap().unwrap()
+        );
     }
 
     #[test]
@@ -665,6 +951,177 @@ mod tests {
         println!("Pos: {:?}", pos);
         println!("Char: {:?}", iter);
     }
+
+    #[test]
+    fn test_scan_integer() {
+        // Regular Integer
+        assert_eq!(Lexer::scan_integer("12345"), Ok(12345));
+        // Another Integer
+        assert_eq!(Lexer::scan_integer("-12345"), Ok(-12345));
+
+        // Hex Integer
+        assert_eq!(Lexer::scan_integer("0xffff"), Ok(65535));
+        assert_eq!(Lexer::scan_integer("0Xffff"), Ok(65535));
+        assert_eq!(Lexer::scan_integer("0xFFFF"), Ok(65535));
+        assert_eq!(Lexer::scan_integer("0XFFFF"), Ok(65535));
+
+        // Binary Integer
+        assert_eq!(Lexer::scan_integer("0b11111111"), Ok(255));
+        assert_eq!(Lexer::scan_integer("0B11111111"), Ok(255));
+
+        // Octal
+        assert_eq!(Lexer::scan_integer("0o10"), Ok(8));
+        assert_eq!(Lexer::scan_integer("0O10"), Ok(8));
+
+        assert_eq!(Lexer::scan_integer("102d"), "102d".parse::<i64>());
+        assert!(Lexer::scan_integer("102d").is_err());
+    }
+
+    #[test]
+    fn test_scan_float() {
+        let approx_eq = |lhs: f64, rhs: f64, delta: f64| -> bool {
+            if lhs.is_finite() && rhs.is_finite() {
+                (lhs - rhs).abs() <= delta
+            } else if lhs.is_nan() && rhs.is_nan() {
+                true
+            } else {
+                lhs == rhs
+            }
+        };
+        assert!(approx_eq(
+            Lexer::scan_float("12341.0").unwrap(),
+            12341.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            Lexer::scan_float("-12341.0").unwrap(),
+            -12341.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            Lexer::scan_float("2.23e3").unwrap(),
+            2230.0,
+            0.0001
+        ));
+
+        assert!(approx_eq(
+            Lexer::scan_float("-inf").unwrap(),
+            f64::NEG_INFINITY,
+            0.0001
+        ));
+        assert!(approx_eq(
+            Lexer::scan_float("inf").unwrap(),
+            f64::INFINITY,
+            0.0001
+        ));
+        assert!(approx_eq(
+            Lexer::scan_float("nan").unwrap(),
+            f64::NAN,
+            0.0001
+        ));
+    }
+
+    #[test]
+    fn test_scan_bool() {
+        assert_eq!(Lexer::scan_bool("true"), Ok(true));
+        assert_eq!(Lexer::scan_bool("True"), Ok(true));
+        assert_eq!(Lexer::scan_bool("TRUE"), Ok(true));
+
+        assert_eq!(Lexer::scan_bool("false"), Ok(false));
+        assert_eq!(Lexer::scan_bool("False"), Ok(false));
+        assert_eq!(Lexer::scan_bool("FALSE"), Ok(false));
+    }
+
+    #[test]
+    fn test_primitives() {
+        let input = r#"
+        // This is a test float
+        a = 12345.0
+        b = 12345
+
+        // Another Float
+        c = -12341.0
+        d = -12341
+
+        // Scientific Notation
+        e = 2.23e3
+        f = +1.0
+        g = -inf
+        h = true
+        i = False
+        j = TRUE
+        k = trues
+        l = "true"
+        m = 'FALSE'
+        "#;
+
+        let mut lexer = Lexer::new(input);
+        let expected_tokens = vec![
+            Token::EOL,
+            Token::Comment("This is a test float"),
+            Token::EOL,
+            Token::Key("a"),
+            Token::AssignOp,
+            Token::Float(12345.0),
+            Token::EOL,
+            Token::Key("b"),
+            Token::AssignOp,
+            Token::Integer(12345),
+            Token::EOL,
+            Token::EOL,
+            Token::Comment("Another Float"),
+            Token::EOL,
+            Token::Key("c"),
+            Token::AssignOp,
+            Token::Float(-12341.0),
+            Token::EOL,
+            Token::Key("d"),
+            Token::AssignOp,
+            Token::Integer(-12341),
+            Token::EOL,
+            Token::EOL,
+            Token::Comment("Scientific Notation"),
+            Token::EOL,
+            Token::Key("e"),
+            Token::AssignOp,
+            Token::Float(2230.0),
+            Token::EOL,
+            Token::Key("f"),
+            Token::AssignOp,
+            Token::Float(1.0),
+            Token::EOL,
+            Token::Key("g"),
+            Token::AssignOp,
+            Token::Float(f64::NEG_INFINITY),
+            Token::EOL,
+            Token::Key("h"),
+            Token::AssignOp,
+            Token::Boolean(true),
+            Token::EOL,
+            Token::Key("i"),
+            Token::AssignOp,
+            Token::Boolean(false),
+            Token::EOL,
+            Token::Key("j"),
+            Token::AssignOp,
+            Token::Boolean(true),
+            Token::EOL,
+            Token::Key("k"),
+            Token::AssignOp,
+            Token::ValueString("trues"),
+            Token::EOL,
+            Token::Key("l"),
+            Token::AssignOp,
+            Token::Quote("true"),
+            Token::EOL,
+            Token::Key("m"),
+            Token::AssignOp,
+            Token::Quote("FALSE"),
+            Token::EOL,
+        ];
+        check_tokens(&mut lexer, expected_tokens);
+    }
+
     #[test]
     fn test_listener() {
         use crate::moos;
