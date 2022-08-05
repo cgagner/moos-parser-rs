@@ -15,14 +15,54 @@ pub enum Value<'input> {
 }
 
 #[derive(Debug)]
+pub enum MacroType<'input> {
+    Define(MacroDefinition<'input>),
+    Include(&'input str),
+    IfDef,
+    IfNotDef,
+    ElseIfDef,
+    Else,
+    EndIf,
+}
+
+#[derive(Debug)]
+pub struct MacroDefinition<'input> {
+    name: &'input str,
+    value: Option<Value<'input>>,
+}
+
+impl<'input> MacroDefinition<'input> {
+    /// Create a new MacroDefinition
+    pub fn new(name: &'input str, value: Option<Value<'input>>) -> Self {
+        MacroDefinition { name, value }
+    }
+
+    pub fn eval() -> bool {
+        // TODO: Implement
+        false
+    }
+}
+
+#[derive(Debug)]
+pub enum MacroCondition<'input> {
+    // Simple Definition
+    Simple(MacroDefinition<'input>),
+    // Disjunction Expression (a.k.a. Logical-Or)
+    Disjunction(Vec<MacroDefinition<'input>>),
+    // Conjunction Expression (a.k.a. Logical-And)
+    Conjunction(Vec<MacroDefinition<'input>>),
+    // Mixture of Disjunction and Conjunction - This is an error or false
+    Mixed(Vec<MacroDefinition<'input>>),
+}
+
+#[derive(Debug)]
 pub enum Line<'input> {
     Comment(&'input str),
     Define(&'input str, Value<'input>, Option<&'input str>),
     BlockBegin(&'input str, Option<&'input str>),
     BlockEnd(Option<&'input str>),
-    // TODO: Need to update the assignment to take a variant for the value
     Assignment(&'input str, Value<'input>, Option<&'input str>),
-    Integer(i64),
+    Macro(MacroType<'input>, Option<&'input str>),
     Error,
     EndOfLine,
 }

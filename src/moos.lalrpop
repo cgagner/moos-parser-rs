@@ -1,25 +1,35 @@
 use std::str::FromStr;
 use crate::helpers::remove_first_last;
 use crate::lexer::{Location, Token};
-use crate::parser::Line;
+use crate::parser::{MacroDefinition, MacroCondition, MacroType, Line};
 use crate::error::MoosParseError;
 use lalrpop_util::ErrorRecovery;
 
 //grammar<'input>(input: &'input str);
-grammar<'err, 'input>(errors: &'err mut Vec<ErrorRecovery<Location, Token<'input>, MoosParseError>>, input: &'input str);
+grammar<'err, 'input>(errors: &'err mut Vec<ErrorRecovery<Location, Token<'input>, MoosParseError<'input>>>, input: &'input str);
 
 pub Lines: Vec<Line<'input>> = <Line*>;
 
 pub Line: Line<'input> = {
     Define => <>,
+    MacroDefine => <>,
+    MacroInclude => <>,
+    MacroElse => <>,
+    MacroEndif => <>,
     BlockBegin => <>,
     BlockEnd => <>,
     Assignment => <>,
-    Integer => <>,
+    // TODO: Add a catch-all for unknown lines
     "EOL" => Line::EndOfLine,
     <comment:"Comment"> => Line::Comment(comment),
+    UnknownMacro => <>,
     ! => { errors.push(<>); Line::Error },
+    
 }
+
+// ---------------------------------------------------------------------------
+// Basic Lines 
+// ---------------------------------------------------------------------------
 
 BlockBegin: Line<'input> = {
     "BlockKeyword" "=" <name:"ValueString"> <comment:"Comment"?> <eol:"EOL"?> <l:@L> "{" <r:@R> =>? match eol {
@@ -69,13 +79,118 @@ Value: crate::parser::Value<'input> = {
     <value:"Quote"> => crate::parser::Value::String(value),
 }
 
-Integer: Line<'input> = {
-    <value:"int"> => Line::Integer(value),
+// ---------------------------------------------------------------------------
+// Macros 
+// ---------------------------------------------------------------------------
+
+// TODO: 
+//   1. Add MacroIfDef
+//   2. Add MacroElseIfDef
+//   3. Add MacroIfNotDef
+
+
+MacroDefinition: MacroDefinition<'input> = {
+    <name:"ValueString"> <value:Value?> => {
+        MacroDefinition::new(name, value)
+    }
 }
+
+MacroDefine: Line<'input> = {
+    <d:"define"> <def:MacroDefinition> <comment:"Comment"?> "EOL" => Line::Macro(MacroType::Define(def), comment),
+}
+
+
+MacroElse: Line<'input> = {
+    <d:"else"> <l:@L> <extras:Value*> <r:@R> <comment:"Comment"?> "EOL" => {
+        if !extras.is_empty() {
+            let e = lalrpop_util::ErrorRecovery { 
+                error: lalrpop_util::ParseError::User {
+                    // TODO: Need to create a more descriptive error
+                    error: MoosParseError::new_missing_new_line(l, Location{line: r.line, index: r.index+1})
+                },
+                dropped_tokens: vec![]
+            };
+            errors.push(e);
+            Line::Error
+        } else {
+            Line::Macro(MacroType::Else, comment)
+        }
+    },
+}
+
+MacroEndif: Line<'input> = {
+    <d:"endif"> <l:@L> <extras:Value*> <r:@R> <comment:"Comment"?> "EOL" => {
+        if !extras.is_empty() {
+            let e = lalrpop_util::ErrorRecovery { 
+                error: lalrpop_util::ParseError::User {
+                    // TODO: Need to create a more descriptive error
+                    error: MoosParseError::new_missing_new_line(l, Location{line: r.line, index: r.index+1})
+                },
+                dropped_tokens: vec![]
+            };
+            errors.push(e);
+            Line::Error
+        } else {
+            Line::Macro(MacroType::EndIf, comment)
+        }
+    },
+}
+
+MacroInclude: Line<'input> = {
+    <d:"include"> <path:"ValueString"> <l:@L> <extras:Value*> <r:@R> <comment:"Comment"?> "EOL" => {
+        if !extras.is_empty() {
+            let e = lalrpop_util::ErrorRecovery { 
+                error: lalrpop_util::ParseError::User {
+                    // TODO: Need to create a more descriptive error
+                    error: MoosParseError::new_missing_new_line(l, Location{line: r.line, index: r.index+1})
+                },
+                dropped_tokens: vec![]
+            };
+            errors.push(e);
+            Line::Error
+        } else {
+            Line::Macro(MacroType::Include(path), comment)
+        }
+    }, 
+    <d:"include"> <path:"Quote"> <l:@L> <extras:Value*> <r:@R> <comment:"Comment"?> "EOL" => {
+        if !extras.is_empty() {
+            let e = lalrpop_util::ErrorRecovery { 
+                error: lalrpop_util::ParseError::User {
+                    // TODO: Need to create a more descriptive error
+                    error: MoosParseError::new_missing_new_line(l, Location{line: r.line, index: r.index+1})
+                },
+                dropped_tokens: vec![]
+            };
+            errors.push(e);
+            Line::Error
+        } else {
+            Line::Macro(MacroType::Include(path), comment)
+        }
+    }, 
+}
+
+UnknownMacro: Line<'input> = {
+     <l:@L> <m:"unknown_macro"> => {
+        let e = lalrpop_util::ErrorRecovery { 
+                error: lalrpop_util::ParseError::User {
+                    error: MoosParseError::new_unknown_macro(l, m)
+                },
+                dropped_tokens: vec![]
+            };
+        errors.push(e);
+        Line::Error
+    }
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Token Definitions 
+// ---------------------------------------------------------------------------
 
 extern {  
     type Location = crate::lexer::Location;
-    type Error = MoosParseError;
+    type Error = MoosParseError<'input>;
     
     enum Token<'input> {
         "(" => Token::ParenOpen, 
@@ -96,5 +211,15 @@ extern {
         "int" => Token::Integer(<i64>),
         "float" => Token::Float(<f64>),
         "bool" => Token::Boolean(<bool>),
+        "define" => Token::MacroDefine,
+        "else" => Token::MacroElse,
+        "elseifdef" => Token::MacroElseIfDef,
+        "endif" => Token::MacroEndIf,
+        "ifdef" => Token::MacroIfDef,
+        "ifndef" => Token::MacroIfNotDef,
+        "include" => Token::MacroInclude,
+        "unknown_macro" => Token::UnknownMacro(<&'input str>),
+        "||" => Token::OrOperator,
+        "&&" => Token::AndOperator,
     }
 }

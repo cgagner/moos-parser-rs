@@ -3,9 +3,12 @@ use crate::error::MoosParseError;
 use core::cmp::max;
 use core::str;
 use core::str::{CharIndices, ParseBoolError};
+use std::ascii::AsciiExt;
+use std::collections::VecDeque;
 use std::num::{ParseFloatError, ParseIntError};
 
 pub type Spanned<Token, Loc, Error> = Result<(Loc, Token, Loc), Error>;
+pub type TokenQueue<'input> = VecDeque<Spanned<Token<'input>, Location, MoosParseError<'input>>>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Location {
@@ -44,10 +47,20 @@ pub enum Token<'input> {
     ValueString(&'input str),
     Variable(&'input str),
     PartialVariable(&'input str, char),
+    MacroDefine,
+    MacroInclude,
+    MacroIfDef,
+    MacroIfNotDef,
+    MacroElseIfDef,
+    MacroElse,
+    MacroEndIf,
+    UnknownMacro(&'input str),
+    OrOperator,
+    AndOperator,
+    /// End of Line
     EOL,
+    /// End of File
     EOF,
-    Space,
-    // Variable
 }
 
 pub trait TokenListener {
@@ -65,6 +78,7 @@ pub struct Lexer<'input, 'listen> {
     found_assign_op: bool,
     found_define_op: bool,
     found_block_keyword: bool,
+    token_queue: TokenQueue<'input>,
 }
 
 impl<'input, 'listen> Lexer<'input, 'listen> {
@@ -82,6 +96,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             found_assign_op: false,
             found_define_op: false,
             found_block_keyword: false,
+            token_queue: TokenQueue::new(),
         }
     }
 
@@ -98,6 +113,40 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         Location::new(self.line_number, max(index - self.char_count, 0))
     }
 
+    /// Find the next whitespace after the specified `start_index`
+    fn find_next_whitespace(&mut self, input: &str, start_index: usize) -> (usize, char) {
+        // Handle special cases
+        if let Some(v) = input[start_index..]
+            .char_indices()
+            .find(|&(_index, c)| c == ' ' || c == '\t' || c == '\n')
+        {
+            (v.0 + start_index, v.1)
+        } else {
+            (input.len(), '\0')
+        }
+    }
+
+    /// Advance the iterator to the next white space. This method is typically
+    /// used in conjunction with `find_next_whitespace`.
+    fn advance_to_whitespace(&mut self, next_whitespace: (usize, char)) {
+        let current = loop {
+            if let Some((ii, cc)) = self.chars.next() {
+                if ii == next_whitespace.0 {
+                    break Some((ii, cc));
+                }
+            } else {
+                break None;
+            }
+        };
+
+        if next_whitespace.1 != '\n' {
+            self.current = self.chars.next();
+        } else {
+            self.current = current;
+            self.handle_new_line();
+        }
+    }
+
     #[inline]
     fn handle_new_line(&mut self) {
         self.start_of_line = true;
@@ -111,7 +160,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         &mut self,
         start_index: usize,
         _: char,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         self.start_of_line = false;
         self.current = self.chars.next();
         let (identifier, end_index) = loop {
@@ -140,7 +189,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                     self.get_location(j),
                 )));
             } else {
-                // TODO: Error
+                // TODO: Error - This might be handled in the parser
             }
         } else if identifier.eq_ignore_ascii_case("processconfig") {
             self.found_block_keyword = true;
@@ -163,7 +212,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         &mut self,
         i: usize,
         quote: char,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         self.current = self.chars.next();
 
         while let Some((j, c)) = self.current {
@@ -205,7 +254,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
     fn scan_comment(
         &mut self,
         start_index: usize,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         self.current = self.chars.next();
 
         if let Some((_, '/')) = self.current {
@@ -255,7 +304,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         &mut self,
         i: usize,
         token: Token<'input>,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         self.current = self.chars.next();
         Some(Ok((self.get_location(i), token, self.get_location(i + 1))))
     }
@@ -264,7 +313,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
     fn scan_value(
         &mut self,
         start_index: usize,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         let (s, _end_index) = loop {
             match self.current {
                 None => break (&self.input[start_index..], self.input.len()),
@@ -314,43 +363,12 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                     }
                     _ => {
                         // Handle special cases
-                        let next_whitespace = {
-                            if let Some(v) = self.input[start_index..]
-                                .char_indices()
-                                .find(|&(_index, c)| c == ' ' || c == '\t' || c == '\n')
-                            {
-                                (v.0 + start_index, v.1)
-                            } else {
-                                (self.input.len(), '\0')
-                            }
-                        };
-
-                        // Create a closure that will advance the iterator to
-                        // the next whitespace.s
-                        let advance_to_whitespace = |s: &mut Self| {
-                            // Iterate forward to the next_whitespace
-                            let current = loop {
-                                if let Some((ii, cc)) = s.chars.next() {
-                                    if ii == next_whitespace.0 {
-                                        break Some((ii, cc));
-                                    }
-                                } else {
-                                    break None;
-                                }
-                            };
-
-                            if next_whitespace.1 != '\n' {
-                                s.current = s.chars.next();
-                            } else {
-                                s.current = current;
-                                s.handle_new_line();
-                            }
-                        };
+                        let next_whitespace = self.find_next_whitespace(self.input, start_index);
 
                         if let Ok(value) =
                             Self::scan_integer(&self.input[start_index..next_whitespace.0])
                         {
-                            advance_to_whitespace(self);
+                            self.advance_to_whitespace(next_whitespace);
                             return Some(Ok((
                                 self.get_location(start_index),
                                 Token::Integer(value),
@@ -359,7 +377,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         } else if let Ok(value) =
                             Self::scan_float(&self.input[start_index..next_whitespace.0])
                         {
-                            advance_to_whitespace(self);
+                            self.advance_to_whitespace(next_whitespace);
                             return Some(Ok((
                                 self.get_location(start_index),
                                 Token::Float(value),
@@ -368,7 +386,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         } else if let Ok(value) =
                             Self::scan_bool(&self.input[start_index..next_whitespace.0])
                         {
-                            advance_to_whitespace(self);
+                            self.advance_to_whitespace(next_whitespace);
                             return Some(Ok((
                                 self.get_location(start_index),
                                 Token::Boolean(value),
@@ -389,10 +407,13 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         )))
     }
 
+    // TODO: This does not handle cases where the variable is in the
+    // middle of a string. E.G:
+    // test = targ_${VEHICLE}.bhv
     fn scan_variable(
         &mut self,
         i: usize,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         self.current = self.chars.next();
 
         if let Some((_, '{')) = self.current {
@@ -435,23 +456,326 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         )))
     }
 
+    fn handle_partial_string(
+        &mut self,
+        remaining: &'input str,
+        tok_start: &mut usize,
+        index: usize,
+        offset: usize,
+        allow_primitives_count: usize,
+    ) {
+        println!("start: {:?}  -  end: {:?}", *tok_start, index);
+        if *tok_start != index {
+            let string = &remaining[*tok_start..index].trim();
+
+            let token = if allow_primitives_count == 1 {
+                if let Ok(value) = Self::scan_integer(string) {
+                    Token::Integer(value)
+                } else if let Ok(value) = Self::scan_float(string) {
+                    Token::Float(value)
+                } else if let Ok(value) = Self::scan_bool(string) {
+                    Token::Boolean(value)
+                } else {
+                    // If all else fails, add it as a string
+                    Token::ValueString(string)
+                }
+            } else {
+                Token::ValueString(string)
+            };
+
+            self.token_queue.push_back(Ok((
+                self.get_location(offset + *tok_start), // TODO: Need to calculate the correct offset
+                token,
+                self.get_location(offset + index - 1),
+            )));
+
+            *tok_start = index;
+        };
+    }
+
     #[inline]
-    fn is_number_digit(c: char) -> bool {
-        match c {
-            '-' | '+' => true,
-            '0'..='9' => true,
-            _ => false,
+    fn scan_macro(
+        &mut self,
+        i: usize,
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
+        self.current = self.chars.next();
+
+        let line = if let Some((line, _rem)) = self.input[i..].split_once('\n') {
+            line
+        } else {
+            &self.input[i..]
+        };
+
+        println!("LINE: {:?}", line);
+
+        let mut macro_index = 1;
+        // Skip spaces between the # and macro keyword
+        for (ii, cc) in line[macro_index..].char_indices() {
+            match cc {
+                ' ' | '\r' | '\t' => {}
+                _ => {
+                    macro_index = ii + 1;
+                    break;
+                }
+            }
+        }
+
+        let next_whitespace = self.find_next_whitespace(line, macro_index);
+
+        if line[macro_index..next_whitespace.0].is_empty() {
+            return None;
+        }
+
+        // [endif|else] - [comment]
+        // include [quote|string] [comment]
+        // define [key|variable] [value|variable] [comment]
+        // [ifdef|elseifdef] [condition] [|| &&] [condition]
+        // ifndef [key|variable] [comment]
+
+        let token = match line[macro_index..next_whitespace.0]
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "define" => Token::MacroDefine,
+            "else" => Token::MacroElse,
+            "elseifdef" => Token::MacroElseIfDef,
+            "endif" => Token::MacroEndIf,
+            "ifdef" => Token::MacroIfDef,
+            "ifndef" => Token::MacroIfNotDef,
+            "include" => Token::MacroInclude,
+            _ => Token::UnknownMacro(&line[macro_index..next_whitespace.0]),
+        };
+
+        let found_define_keyword = if let Token::MacroDefine = token {
+            true
+        } else {
+            false
+        };
+
+        // Consume the whole line
+        for _n in 1..line.len() {
+            self.current = self.chars.next();
+        }
+
+        self.token_queue.push_back(Ok((
+            self.get_location(i),
+            token,
+            self.get_location(i + next_whitespace.0),
+        )));
+
+        let remaining = &line[next_whitespace.0..];
+        let mut remaining_chars = remaining.char_indices().peekable();
+        let mut iter = remaining_chars.next();
+
+        // Need to scan for quotes, comments, &&, ||, Variables, numbers
+
+        let mut tok_start = iter.unwrap_or((0, '\0')).0;
+
+        let offset = next_whitespace.0 + i;
+
+        let mut allow_primitives_count = 0_usize;
+
+        'scan_line: loop {
+            let next_c = remaining_chars.peek().unwrap_or(&(0, '\0')).1;
+            match iter {
+                None => {
+                    // End of line - Check if we've parsed a word
+                    // Push out a new word token
+                    let word = &remaining[tok_start..];
+                    if !word.is_empty() {
+                        println!("End of line word: {:?}", word);
+                        self.handle_partial_string(
+                            remaining,
+                            &mut tok_start,
+                            remaining.len(),
+                            offset,
+                            allow_primitives_count,
+                        );
+                    }
+                    break 'scan_line;
+                }
+                Some((ii, cc)) => match cc {
+                    // Skip whitespace
+                    cc if (!found_define_keyword || allow_primitives_count == 0) && cc == ' '
+                        || cc == '\r'
+                        || cc == '\t' =>
+                    {
+                        // Push out a new word token
+                        let word = &remaining[tok_start..ii].trim();
+                        if !word.is_empty() {
+                            println!("Token word: {:?}", word);
+                            self.handle_partial_string(
+                                remaining,
+                                &mut tok_start,
+                                ii,
+                                offset,
+                                allow_primitives_count,
+                            );
+                            allow_primitives_count += 1;
+                        }
+
+                        // Need to skip additional spaces without creating
+                        // words
+                        loop {
+                            let next_c = remaining_chars.peek().unwrap_or(&(0, '\0')).1;
+                            match next_c {
+                                '\0' => break 'scan_line,
+                                ' ' | '\r' | '\t' => {}
+                                _ => break,
+                            }
+                            iter = remaining_chars.next();
+                        }
+                        if let Some((iii, _ccc)) = iter {
+                            tok_start = iii + 1;
+                        }
+                    }
+                    // // Skip Escape characters
+                    // '\\' => {
+                    //     iter = remaining_chars.next();
+                    //     // Take an extra char for escape characters
+                    //     if let Some((_, _)) = iter {
+                    //         iter = remaining_chars.next()
+                    //     }
+                    // }
+                    c if c == '/' && next_c == '/' => {
+                        self.handle_partial_string(
+                            remaining,
+                            &mut tok_start,
+                            ii,
+                            offset,
+                            allow_primitives_count,
+                        );
+                        let comment = remaining[ii + 2..].trim();
+                        println!("Comment: {:?}", comment);
+
+                        self.token_queue.push_back(Ok((
+                            self.get_location(offset + ii),
+                            Token::Comment(comment),
+                            self.get_location(offset + remaining.len()),
+                        )));
+
+                        break 'scan_line;
+                    }
+                    '"' => {
+                        self.handle_partial_string(
+                            remaining,
+                            &mut tok_start,
+                            ii,
+                            offset,
+                            allow_primitives_count,
+                        );
+
+                        iter = remaining_chars.next();
+                        // Scan for quotes
+                        '_quote_loop: loop {
+                            match iter {
+                                None => {
+                                    // Partial quote
+
+                                    let quote = &remaining[tok_start + 1..];
+                                    println!("found partial quote: {:?}", quote);
+
+                                    self.token_queue.push_back(Ok((
+                                        self.get_location(offset + ii),
+                                        Token::PartialQuote(quote, '"'),
+                                        self.get_location(offset + remaining.len()),
+                                    )));
+
+                                    break 'scan_line;
+                                }
+                                Some((iii, ccc)) => match ccc {
+                                    '"' => {
+                                        iter = remaining_chars.next();
+                                        let quote = &remaining[tok_start + 1..iii];
+                                        println!("found quote: {:?}", quote);
+                                        // Found end of quote
+
+                                        self.token_queue.push_back(Ok((
+                                            self.get_location(offset + ii),
+                                            Token::Quote(quote),
+                                            self.get_location(offset + iii),
+                                        )));
+
+                                        tok_start = iii + 1;
+                                        allow_primitives_count += 1;
+                                        continue 'scan_line;
+                                    }
+                                    _ => iter = remaining_chars.next(),
+                                },
+                            }
+                        }
+                    }
+                    c if c == '|' && next_c == '|' => {
+                        self.handle_partial_string(
+                            remaining,
+                            &mut tok_start,
+                            ii,
+                            offset,
+                            allow_primitives_count,
+                        );
+                        // Or operator
+                        println!("Or operator");
+
+                        self.token_queue.push_back(Ok((
+                            self.get_location(offset + tok_start), // TODO: Need to calculate the correct offset
+                            Token::OrOperator,
+                            self.get_location(offset + tok_start + 1),
+                        )));
+
+                        iter = remaining_chars.next();
+                        allow_primitives_count = 0;
+                        tok_start += 2;
+                    }
+                    c if c == '&' && next_c == '&' => {
+                        self.handle_partial_string(
+                            remaining,
+                            &mut tok_start,
+                            ii,
+                            offset,
+                            allow_primitives_count,
+                        );
+                        // And operator
+                        println!("And operator");
+
+                        self.token_queue.push_back(Ok((
+                            self.get_location(offset + tok_start), // TODO: Need to calculate the correct offset
+                            Token::AndOperator,
+                            self.get_location(offset + tok_start + 1),
+                        )));
+
+                        iter = remaining_chars.next();
+                        allow_primitives_count = 0;
+                        tok_start += 2;
+                    }
+                    c if c == '$' && next_c == '{' => {
+                        // Environment variable
+                    }
+                    c if c == '$' && next_c == '(' => {
+                        // Plug variable
+                    }
+
+                    _ => {}
+                },
+            }
+            iter = remaining_chars.next();
+        }
+
+        if let Some(token) = self.token_queue.pop_front() {
+            return Some(token);
+        } else {
+            None
         }
     }
 
     #[inline]
-    fn is_number_start(c: char, next_c: char) -> bool {
-        match c {
-            '-' | '+' | '0'..='9' => {}
-            _ => return false,
-        }
+    fn scan_ifdef(&mut self, rest: &str) {}
 
-        return true;
+    #[inline]
+    fn scan_include(
+        &mut self,
+        i: usize,
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
+        None
     }
 
     /// Scan a string for an integer. This method handles regular integers
@@ -491,7 +815,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         }
     }
 
-    fn _next(&mut self) -> Option<Spanned<Token<'input>, Location, MoosParseError>> {
+    fn _next(&mut self) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
+        if let Some(token) = self.token_queue.pop_front() {
+            return Some(token);
+        }
+
         loop {
             let next_c = self.chars.peek().unwrap_or(&(0, '\0')).1;
             match self.current {
@@ -526,8 +854,17 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         self.char_count = i + 1;
                         return result;
                     }
+                    // c if c == '#' && next_c.is_alphanumeric() => {
+                    '#' => {
+                        self.start_of_line = false;
+                        // found_define_op should only be true the once
+                        self.found_define_op = false;
+                        return self.scan_macro(i);
+                    }
                     c if (self.start_of_line || self.found_define_op) && c.is_alphanumeric() => {
                         self.start_of_line = false;
+                        // found_define_op should only be true the once
+                        self.found_define_op = false;
                         return self.scan_identifier(i, c);
                     }
                     c if c == '/' && next_c == '/' => {
@@ -607,6 +944,8 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             )));
                         }
 
+                        // TODO: An error here results in the rest of the file from getting parsed.
+
                         // TODO: Not sure we should be returning an error here
                         // This should probably just return a the entire string
                         return Some(Err(MoosParseError::new_unexpected_symbol(
@@ -622,7 +961,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
 }
 
 impl<'input, 'listen> Iterator for Lexer<'input, 'listen> {
-    type Item = Spanned<Token<'input>, Location, MoosParseError>;
+    type Item = Spanned<Token<'input>, Location, MoosParseError<'input>>;
     fn next(&mut self) -> Option<Self::Item> {
         let rtn = self._next();
 
@@ -1118,6 +1457,58 @@ mod tests {
             Token::AssignOp,
             Token::Quote("FALSE"),
             Token::EOL,
+        ];
+        check_tokens(&mut lexer, expected_tokens);
+    }
+
+    #[test]
+    fn test_scan_macro() {
+        let input = r#"
+        #include asdf 
+        #include "Test.plug"
+        #define VALUE00  This is a test
+        #define VALUE01 This is a test // Comment after define
+
+        #ifdef VALUE1 12 // Test Comment  
+        #else // Comment
+        #define VALUE2 "this is a quote"
+        #include "filepath.txt"
+        #else // Comment
+        #ifdef VALUE3 12 || VALUE4 123
+        #endif // Comments
+        #endfi // Unknown macro
+        "#;
+
+        let mut lexer = Lexer::new(input);
+        while let Some(Ok((_, token, _))) = lexer.next() {
+            println!("test_scan_macro Token: {:?}", token);
+        }
+
+        let mut lexer = Lexer::new(input);
+        let expected_tokens = vec![
+            Token::EOL,
+            Token::MacroInclude,
+            Token::ValueString("asdf"),
+            Token::EOL,
+            Token::MacroInclude,
+            Token::Quote("Test.plug"),
+            Token::EOL,
+            Token::MacroDefine,
+            Token::ValueString("VALUE00"),
+            Token::ValueString("This is a test"),
+            Token::EOL,
+            Token::MacroDefine,
+            Token::ValueString("VALUE01"),
+            Token::ValueString("This is a test"),
+            Token::Comment("Comment after define"),
+            Token::EOL,
+            Token::EOL,
+            Token::MacroIfDef,
+            Token::ValueString("VALUE1"),
+            Token::Integer(12),
+            Token::Comment("Test Comment"),
+            Token::EOL,
+            // TODO: Need to finish added test cases for macros
         ];
         check_tokens(&mut lexer, expected_tokens);
     }
