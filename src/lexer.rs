@@ -3,7 +3,6 @@ use crate::error::MoosParseError;
 use core::cmp::max;
 use core::str;
 use core::str::{CharIndices, ParseBoolError};
-use std::ascii::AsciiExt;
 use std::collections::VecDeque;
 use std::num::{ParseFloatError, ParseIntError};
 
@@ -45,8 +44,12 @@ pub enum Token<'input> {
     DefineKeyword,
     BlockKeyword(&'input str),
     ValueString(&'input str),
-    Variable(&'input str),
-    PartialVariable(&'input str, char),
+    EnvVariable(&'input str),
+    PartialEnvVariable(&'input str),
+    PlugVariable(&'input str),
+    PartialPlugVariable(&'input str),
+    PlugUpperVariable(&'input str),
+    PartialPlugUpperVariable(&'input str),
     MacroDefine,
     MacroInclude,
     MacroIfDef,
@@ -79,6 +82,8 @@ pub struct Lexer<'input, 'listen> {
     found_define_op: bool,
     found_block_keyword: bool,
     token_queue: TokenQueue<'input>,
+    block_keywords: Vec<&'static str>,
+    keywords: Vec<&'static str>,
 }
 
 impl<'input, 'listen> Lexer<'input, 'listen> {
@@ -97,6 +102,8 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             found_define_op: false,
             found_block_keyword: false,
             token_queue: TokenQueue::new(),
+            block_keywords: vec!["processconfig", "behavior"], // TODO: This should only be one or the other
+            keywords: vec!["define:", "set", "initialize"],
         }
     }
 
@@ -113,12 +120,21 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         Location::new(self.line_number, max(index - self.char_count, 0))
     }
 
+    #[inline]
+    fn push_token(&mut self, start_index: usize, token: Token<'input>, end_index: usize) {
+        self.token_queue.push_back(Ok((
+            self.get_location(start_index),
+            token,
+            self.get_location(end_index),
+        )));
+    }
+
     /// Find the next whitespace after the specified `start_index`
-    fn find_next_whitespace(&mut self, input: &str, start_index: usize) -> (usize, char) {
+    fn find_next_split_token(input: &str, start_index: usize) -> (usize, char) {
         // Handle special cases
         if let Some(v) = input[start_index..]
             .char_indices()
-            .find(|&(_index, c)| c == ' ' || c == '\t' || c == '\n')
+            .find(|&(_index, c)| c == ' ' || c == '\t' || c == '\n' || c == '/' || c == '=')
         {
             (v.0 + start_index, v.1)
         } else {
@@ -126,12 +142,41 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         }
     }
 
-    /// Advance the iterator to the next white space. This method is typically
+    /// Finds the next variable in a specified string
+    fn find_next_variable(
+        input: &str,
+        start_index: usize,
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
+        let mut char_indices = input[start_index..].char_indices().peekable();
+        let mut iter = char_indices.next();
+        let mut next = char_indices.peek();
+        loop {
+            let next_c = char_indices.peek().unwrap_or(&(0, '\0')).1;
+            match iter {
+                None => return None,
+                Some((i, c)) => match c {
+                    c if c == '$' && next_c == '(' => {
+                        // TODO
+                        return None;
+                    }
+                    c if c == '$' && next_c == '{' => {
+                        // TODO
+                        return None;
+                    }
+                    _ => iter = char_indices.next(),
+                },
+            }
+        }
+
+        None
+    }
+
+    /// Advance the iterator to the next iterator. This method is typically
     /// used in conjunction with `find_next_whitespace`.
-    fn advance_to_whitespace(&mut self, next_whitespace: (usize, char)) {
+    fn advance_to_iterator(&mut self, iterator: (usize, char)) {
         let current = loop {
             if let Some((ii, cc)) = self.chars.next() {
-                if ii == next_whitespace.0 {
+                if ii == iterator.0 {
                     break Some((ii, cc));
                 }
             } else {
@@ -139,7 +184,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             }
         };
 
-        if next_whitespace.1 != '\n' {
+        if iterator.1 != '\n' {
             self.current = self.chars.next();
         } else {
             self.current = current;
@@ -251,7 +296,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
     }
 
     #[inline]
-    fn scan_comment(
+    fn scan_comment_old(
         &mut self,
         start_index: usize,
     ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
@@ -275,6 +320,8 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             }
         }
         // TODO: Need to figure out if this is better look at user iter.position
+
+        // TODO: Update this to use trim
 
         // Or continue with:
         while let Some((j, c)) = self.current {
@@ -363,34 +410,35 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                     }
                     _ => {
                         // Handle special cases
-                        let next_whitespace = self.find_next_whitespace(self.input, start_index);
+                        let next_split_token =
+                            Lexer::find_next_split_token(self.input, start_index);
 
                         if let Ok(value) =
-                            Self::scan_integer(&self.input[start_index..next_whitespace.0])
+                            Self::scan_integer(&self.input[start_index..next_split_token.0])
                         {
-                            self.advance_to_whitespace(next_whitespace);
+                            self.advance_to_iterator(next_split_token);
                             return Some(Ok((
                                 self.get_location(start_index),
                                 Token::Integer(value),
-                                self.get_location(next_whitespace.0),
+                                self.get_location(next_split_token.0),
                             )));
                         } else if let Ok(value) =
-                            Self::scan_float(&self.input[start_index..next_whitespace.0])
+                            Self::scan_float(&self.input[start_index..next_split_token.0])
                         {
-                            self.advance_to_whitespace(next_whitespace);
+                            self.advance_to_iterator(next_split_token);
                             return Some(Ok((
                                 self.get_location(start_index),
                                 Token::Float(value),
-                                self.get_location(next_whitespace.0),
+                                self.get_location(next_split_token.0),
                             )));
                         } else if let Ok(value) =
-                            Self::scan_bool(&self.input[start_index..next_whitespace.0])
+                            Self::scan_bool(&self.input[start_index..next_split_token.0])
                         {
-                            self.advance_to_whitespace(next_whitespace);
+                            self.advance_to_iterator(next_split_token);
                             return Some(Ok((
                                 self.get_location(start_index),
                                 Token::Boolean(value),
-                                self.get_location(next_whitespace.0),
+                                self.get_location(next_split_token.0),
                             )));
                         }
 
@@ -435,7 +483,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             } else if c == '}' {
                 return Some(Ok((
                     self.get_location(i),
-                    Token::Variable(&self.input[i + 2..j]),
+                    Token::EnvVariable(&self.input[i + 2..j]),
                     self.get_location(j),
                 )));
             } else if c == '\n' {
@@ -444,14 +492,14 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                 // so we'll do the same here.
                 return Some(Ok((
                     self.get_location(i),
-                    Token::PartialVariable(&self.input[i + 2..j], '}'),
+                    Token::PartialEnvVariable(&self.input[i + 2..j]),
                     self.get_location(j),
                 )));
             }
         }
         Some(Ok((
             self.get_location(i),
-            Token::PartialVariable(&self.input[i + 2..], '}'),
+            Token::PartialEnvVariable(&self.input[i + 2..]),
             self.get_location(self.input.len()),
         )))
     }
@@ -483,48 +531,17 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                 Token::ValueString(string)
             };
 
-            self.token_queue.push_back(Ok((
-                self.get_location(offset + *tok_start), // TODO: Need to calculate the correct offset
-                token,
-                self.get_location(offset + index - 1),
-            )));
+            self.push_token(offset + *tok_start, token, offset + index - 1);
 
             *tok_start = index;
         };
     }
 
     #[inline]
-    fn scan_macro(
-        &mut self,
-        i: usize,
-    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
-        self.current = self.chars.next();
+    fn scan_macro_str(&mut self, i: usize, line: &'input str) {
+        let macro_index = 1;
 
-        let line = if let Some((line, _rem)) = self.input[i..].split_once('\n') {
-            line
-        } else {
-            &self.input[i..]
-        };
-
-        println!("LINE: {:?}", line);
-
-        let mut macro_index = 1;
-        // Skip spaces between the # and macro keyword
-        for (ii, cc) in line[macro_index..].char_indices() {
-            match cc {
-                ' ' | '\r' | '\t' => {}
-                _ => {
-                    macro_index = ii + 1;
-                    break;
-                }
-            }
-        }
-
-        let next_whitespace = self.find_next_whitespace(line, macro_index);
-
-        if line[macro_index..next_whitespace.0].is_empty() {
-            return None;
-        }
+        let next_split_token = Lexer::find_next_split_token(line, macro_index);
 
         // [endif|else] - [comment]
         // include [quote|string] [comment]
@@ -532,7 +549,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         // [ifdef|elseifdef] [condition] [|| &&] [condition]
         // ifndef [key|variable] [comment]
 
-        let token = match line[macro_index..next_whitespace.0]
+        let token = match line[macro_index..next_split_token.0]
             .to_ascii_lowercase()
             .as_str()
         {
@@ -543,7 +560,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             "ifdef" => Token::MacroIfDef,
             "ifndef" => Token::MacroIfNotDef,
             "include" => Token::MacroInclude,
-            _ => Token::UnknownMacro(&line[macro_index..next_whitespace.0]),
+            _ => Token::UnknownMacro(&line[macro_index..next_split_token.0]),
         };
 
         let found_define_keyword = if let Token::MacroDefine = token {
@@ -552,18 +569,9 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             false
         };
 
-        // Consume the whole line
-        for _n in 1..line.len() {
-            self.current = self.chars.next();
-        }
+        self.push_token(i, token, i + next_split_token.0 - 1);
 
-        self.token_queue.push_back(Ok((
-            self.get_location(i),
-            token,
-            self.get_location(i + next_whitespace.0),
-        )));
-
-        let remaining = &line[next_whitespace.0..];
+        let remaining = &line[next_split_token.0..];
         let mut remaining_chars = remaining.char_indices().peekable();
         let mut iter = remaining_chars.next();
 
@@ -571,7 +579,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
 
         let mut tok_start = iter.unwrap_or((0, '\0')).0;
 
-        let offset = next_whitespace.0 + i;
+        let offset = next_split_token.0 + i;
 
         let mut allow_primitives_count = 0_usize;
 
@@ -648,11 +656,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         let comment = remaining[ii + 2..].trim();
                         println!("Comment: {:?}", comment);
 
-                        self.token_queue.push_back(Ok((
-                            self.get_location(offset + ii),
+                        self.push_token(
+                            offset + ii,
                             Token::Comment(comment),
-                            self.get_location(offset + remaining.len()),
-                        )));
+                            offset + remaining.len(),
+                        );
 
                         break 'scan_line;
                     }
@@ -675,11 +683,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                                     let quote = &remaining[tok_start + 1..];
                                     println!("found partial quote: {:?}", quote);
 
-                                    self.token_queue.push_back(Ok((
-                                        self.get_location(offset + ii),
+                                    self.push_token(
+                                        offset + ii,
                                         Token::PartialQuote(quote, '"'),
-                                        self.get_location(offset + remaining.len()),
-                                    )));
+                                        offset + remaining.len(),
+                                    );
 
                                     break 'scan_line;
                                 }
@@ -690,11 +698,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                                         println!("found quote: {:?}", quote);
                                         // Found end of quote
 
-                                        self.token_queue.push_back(Ok((
-                                            self.get_location(offset + ii),
+                                        self.push_token(
+                                            offset + ii,
                                             Token::Quote(quote),
-                                            self.get_location(offset + iii),
-                                        )));
+                                            offset + iii,
+                                        );
 
                                         tok_start = iii + 1;
                                         allow_primitives_count += 1;
@@ -716,11 +724,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         // Or operator
                         println!("Or operator");
 
-                        self.token_queue.push_back(Ok((
-                            self.get_location(offset + tok_start), // TODO: Need to calculate the correct offset
+                        self.push_token(
+                            offset + tok_start, // TODO: Need to calculate the correct offset
                             Token::OrOperator,
-                            self.get_location(offset + tok_start + 1),
-                        )));
+                            offset + tok_start + 1,
+                        );
 
                         iter = remaining_chars.next();
                         allow_primitives_count = 0;
@@ -737,11 +745,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         // And operator
                         println!("And operator");
 
-                        self.token_queue.push_back(Ok((
-                            self.get_location(offset + tok_start), // TODO: Need to calculate the correct offset
+                        self.push_token(
+                            offset + tok_start, // TODO: Need to calculate the correct offset
                             Token::AndOperator,
-                            self.get_location(offset + tok_start + 1),
-                        )));
+                            offset + tok_start + 1,
+                        );
 
                         iter = remaining_chars.next();
                         allow_primitives_count = 0;
@@ -749,6 +757,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                     }
                     c if c == '$' && next_c == '{' => {
                         // Environment variable
+                        // TODO: I don't think nsplug handles environment variables
                     }
                     c if c == '$' && next_c == '(' => {
                         // Plug variable
@@ -759,9 +768,30 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             }
             iter = remaining_chars.next();
         }
+    }
+
+    #[inline]
+    fn scan_macro(
+        &mut self,
+        i: usize,
+    ) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
+        self.current = self.chars.next();
+
+        let line = if let Some((line, _rem)) = self.input[i..].split_once('\n') {
+            line
+        } else {
+            &self.input[i..]
+        };
+
+        // Consume the whole line
+        for _n in 1..line.len() {
+            self.current = self.chars.next();
+        }
+
+        self.scan_macro_str(i, line);
 
         if let Some(token) = self.token_queue.pop_front() {
-            return Some(token);
+            Some(token)
         } else {
             None
         }
@@ -815,11 +845,488 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         }
     }
 
+    #[inline]
+    fn scan_comment(&mut self, input: &'input str, line_index: usize) {
+        if !input.starts_with("//") {
+            log::debug!("scan_comment called without comment: {:?}", input);
+            return;
+        }
+        self.push_token(
+            line_index,
+            Token::Comment(&input[2..].trim()),
+            line_index + input.len(),
+        );
+    }
+    #[inline]
+    fn scan_variables(
+        &mut self,
+        line: &'input str,
+        line_index: usize,
+        start_of_line: bool,
+        found_assignment: bool,
+    ) {
+        // Sanity check that the input is at least 2 characters
+        if line.len() < 2 {
+            return;
+        }
+        println!(
+            "Scanning for variables: {:?}, start_of_line: {:?}",
+            line, start_of_line
+        );
+
+        let (input, line_index) = if start_of_line {
+            let (input, line_index) = if let Some(index) = line.find("define:") {
+                self.push_token(index, Token::DefineKeyword, index + "define:".len());
+                if let Some(i) = line[index..].find(|x| x != '\t' && x != ' ' && x != '\r') {
+                    //
+                    (&line[index + i..], index + i)
+                } else {
+                    // Nothing else to process
+                    return;
+                }
+            } else {
+                (line, line_index)
+            };
+            // Check for keywords
+            if let Some(first_word) = input.split_whitespace().next() {
+                let first_word_lower = first_word.to_lowercase();
+                println!(
+                    "First Word: {:?}, {} {}",
+                    first_word,
+                    line_index,
+                    first_word.len()
+                );
+                if self.block_keywords.contains(&first_word_lower.as_str()) {
+                    // Handle block keywords
+                    let new_line_index = line_index + first_word.len();
+                    self.push_token(line_index, Token::BlockKeyword(first_word), new_line_index);
+
+                    (&line[first_word.len()..], new_line_index)
+                } else if self.keywords.contains(&first_word_lower.as_str()) {
+                    // TODO: How do we know have a keyword token
+                    (input, line_index)
+                } else {
+                    (input, line_index)
+                }
+            } else {
+                (input, line_index)
+            }
+        } else {
+            (line, line_index)
+        };
+
+        if input.is_empty() {
+            return;
+        }
+
+        let mut iter = input.char_indices().zip(input[1..].char_indices());
+
+        // Look for the following:
+        // `${` - Environment variable
+        // `$(` - NS Plug variable
+        // `%(` - NS Plug variable to uppercase
+        // `//` - Comment
+        // `"`  - Begin Quote
+
+        if let Some(x) = iter.find(|x| {
+            (x.0 .1 == '$' && (x.1 .1 == '{' || x.1 .1 == '('))
+                || (x.0 .1 == '%' && x.1 .1 == '(')
+                || (x.0 .1 == '/' && x.1 .1 == '/')
+        }) {
+            // Check if there is a regular string before the start of the
+            // variable
+            if x.0 .0 != 0 {
+                let tmp = &input[0..x.0 .0];
+                println!("Previous string: {:?}", tmp);
+                self.push_token(
+                    line_index,
+                    Token::ValueString(&input[0..x.0 .0]),
+                    line_index + x.0 .0,
+                );
+            }
+
+            let mut end_iter = input[x.1 .0..].char_indices();
+            let y = match x.1 .1 {
+                '{' => {
+                    loop {
+                        let r = end_iter.find(|&(_index, c)| c == '}' || c == '/');
+                        // TODO: This needs to search for comments
+                        if let Some((ii, cc)) = r {
+                            if cc == '}' {
+                                break Some((ii, cc));
+                            } else if cc == '/' {
+                                // Need to check the next
+                                if let Some(ccc) = input[ii..].chars().nth(1) {
+                                    if ccc == '/' {
+                                        break Some((ii - 1, cc));
+                                    }
+                                }
+                            }
+                        } else {
+                            break None;
+                        }
+                    }
+                }
+                // NS Plug does not check for comments in the middle of variables
+                '(' => end_iter.find(|&(_index, c)| c == ')'),
+                '/' => {
+                    // Found a comment before a variable
+                    self.scan_comment(&input[x.0 .0..], line_index);
+                    return;
+                }
+                _ => None,
+            };
+
+            if let Some((i, _c)) = y {
+                let end_index = i + x.1 .0 + 1;
+                let var_str = &input[x.0 .0 + 2..end_index - 1];
+                if _c != '/' {
+                    println!("Variable: {:?}", &input[x.0 .0..end_index]);
+                    let token = if x.0 .1 == '$' {
+                        if x.1 .1 == '{' {
+                            Token::EnvVariable(var_str)
+                        } else {
+                            Token::PlugVariable(var_str)
+                        }
+                    } else {
+                        Token::PlugUpperVariable(var_str)
+                    };
+                    self.push_token(line_index + x.0 .0, token, line_index + end_index);
+                    self.scan_variables(
+                        &input[end_index..],
+                        line_index + end_index,
+                        start_of_line,
+                        found_assignment,
+                    );
+                } else {
+                    println!("Partial Variable: {:?}", &input[x.0 .0..end_index]);
+                    let token = if x.0 .1 == '$' {
+                        if x.1 .1 == '{' {
+                            Token::PartialEnvVariable(var_str)
+                        } else {
+                            Token::PartialPlugVariable(var_str)
+                        }
+                    } else {
+                        Token::PartialPlugUpperVariable(var_str)
+                    };
+                    self.push_token(line_index + x.0 .0, token, line_index + end_index);
+                    // TODO: Need to push the comment
+                    println!("Scan comment: {:?}", &input[end_index..]);
+                    self.scan_comment(&input[end_index..], line_index + end_index);
+                }
+            } else {
+                // No variable-end char and reached the end of the line
+                println!("Partial Variable: {:?}", &input[x.0 .0..]);
+                let token = if x.0 .1 == '$' {
+                    if x.1 .1 == '{' {
+                        Token::PartialEnvVariable(&input[x.0 .0 + 2..])
+                    } else {
+                        Token::PartialPlugVariable(&input[x.0 .0 + 2..])
+                    }
+                } else {
+                    Token::PartialPlugUpperVariable(&input[x.0 .0 + 2..])
+                };
+                self.push_token(line_index + x.0 .0, token, line_index + input.len());
+            }
+        } else {
+            // Start of variable not found
+            if !input.is_empty() {
+                // TODO: If found_assignment == true, then check for primitives first
+                println!("Last string: {:?}", input);
+                self.push_token(
+                    line_index,
+                    Token::ValueString(&input),
+                    line_index + input.len(),
+                );
+            }
+        }
+    }
+
+    #[inline]
+    fn tokenize(&mut self) {
+        // MOOS configuration files are line based files. There are only a
+        // handful of lines that can be used.
+        //
+        // `ProcessConfig = AppName` - Process config line
+        // `{` Beginning of the process config block line
+        // `}` End of the process config block line
+        // `<name> = <value>` - Assignment
+        // `define: name = value` - Local variable assignment
+        //
+        // Comment are stripped off of the line before checking for the above
+        // line types. The config parser also checks that a comment is not
+        // inside of quotes. E.G. `name = " test // test"`
+        // All other lines are ignored by the Config reader.
+        // Some applications may still use the file parser, but that
+        // is not considered here.
+
+        let mut found_assignment = false;
+        let mut start_of_line = true;
+
+        let mut iter = self.input.char_indices().peekable();
+        let get_safe_index = |i: usize| {
+            if i < self.input.len() {
+                Some(i)
+            } else {
+                None
+            }
+        };
+
+        let get_unhanded_string = |prev_index: Option<usize>, index: usize| {
+            if let Some(prev_i) = prev_index {
+                if let Some(index_after_whitespace) =
+                    self.input[prev_i..index].find(|c| c != ' ' && c != '\t' && c != '\r')
+                {
+                    return Some((
+                        prev_i + index_after_whitespace,
+                        &self.input[prev_i + index_after_whitespace..index],
+                    ));
+                }
+            }
+            None
+        };
+
+        let mut prev_index = get_safe_index(0);
+
+        let mut _handle_new_line =
+            |s: &mut Self,
+             i: usize,
+             start_of_line: &mut bool,
+             found_assignment: &mut bool,
+             prev_index: &mut Option<usize>| {
+                s.token_queue
+                    .push_back(Ok((s.get_location(i), Token::EOL, s.get_location(i))));
+                s.line_number += 1;
+                s.char_count = i + 1;
+                *start_of_line = true;
+                *found_assignment = false;
+                *prev_index = get_safe_index(i + 1);
+            };
+
+        // TODO: Is it better to use find or to just use the iterator
+        while let Some((i, c)) = iter.find(|&(_i, c)| {
+            c == '\n'
+                || c == '"'
+                || (c == '=' && !found_assignment)
+                || ((c == '{' || c == '}') && start_of_line)
+                || (c == '/')
+        }) {
+            if let Some((prev_i, unhandled)) = get_unhanded_string(prev_index, i) {
+                self.scan_variables(unhandled.trim(), prev_i, start_of_line, found_assignment);
+                if !unhandled.trim().is_empty() {
+                    println!("Unhandled string: {:?}", unhandled);
+                    start_of_line = false;
+                } else {
+                    println!("Skipping unhandled string: {:?}", unhandled);
+                }
+            } else {
+            }
+
+            match c {
+                '\n' => {
+                    _handle_new_line(
+                        self,
+                        i,
+                        &mut start_of_line,
+                        &mut found_assignment,
+                        &mut prev_index,
+                    );
+                }
+                '=' => {
+                    if !found_assignment {
+                        // TODO: Add the before tokens
+                        self.push_token(i, Token::AssignOp, i + 1);
+                        found_assignment = true;
+                        start_of_line = false;
+                        prev_index = get_safe_index(i + 1);
+                    }
+                }
+                '"' => {
+                    // Find the matching quote mark
+                    if let Some((ii, cc)) = iter.find(|&(_ii, cc)| cc == '"' || cc == '\n') {
+                        match cc {
+                            '"' => {
+                                self.push_token(i, Token::Quote(&self.input[i + 1..ii]), ii + 1);
+                            }
+                            '\n' => {
+                                self.push_token(
+                                    i,
+                                    Token::PartialQuote(&self.input[i + 1..ii], '"'),
+                                    ii,
+                                );
+
+                                _handle_new_line(
+                                    self,
+                                    ii,
+                                    &mut start_of_line,
+                                    &mut found_assignment,
+                                    &mut prev_index,
+                                );
+                            }
+                            _ => {}
+                        }
+                        prev_index = get_safe_index(ii + 1);
+                    } else {
+                        // Reached the end of the input
+                        self.push_token(
+                            i,
+                            Token::PartialQuote(&self.input[i + 1..], '"'),
+                            self.input.len(),
+                        );
+                        prev_index = None;
+                    }
+                }
+                '/' => {
+                    if let Some((_, '/')) = iter.peek() {
+                        // Comment - Skip over the second slash
+                        let _r = iter.next();
+                        if let Some((ii, cc)) = iter.find(|&(_ii, cc)| cc == '\n') {
+                            self.push_token(i, Token::Comment(&self.input[i + 2..ii].trim()), ii);
+                            prev_index = get_safe_index(ii + 1);
+
+                            _handle_new_line(
+                                self,
+                                ii,
+                                &mut start_of_line,
+                                &mut found_assignment,
+                                &mut prev_index,
+                            );
+                        } else {
+                            // Reached the end of the input
+                            self.push_token(
+                                i,
+                                Token::Comment(&self.input[i + 2..].trim()),
+                                self.input.len(),
+                            );
+                            prev_index = None;
+                        }
+                    }
+                }
+                c if c == '{' && start_of_line => {
+                    self.push_token(i, Token::CurlyOpen, i + 1);
+                    prev_index = get_safe_index(i + 1);
+                }
+                c if c == '}' && start_of_line => {
+                    self.push_token(i, Token::CurlyClose, i + 1);
+                    prev_index = get_safe_index(i + 1);
+                }
+                _ => {}
+            }
+        }
+        if let Some((prev_i, unhandled)) = get_unhanded_string(prev_index, self.input.len()) {
+            if !unhandled.trim().is_empty() {
+                println!("Unhandled string: {:?}", unhandled);
+            } else {
+                println!("Skipping unhandled string: {:?}", unhandled);
+            }
+            self.scan_variables(unhandled.trim(), prev_i, start_of_line, found_assignment);
+        }
+    }
+
+    #[inline]
+    fn scan_line(&mut self, start_index: usize, line: &'input str) {
+        let mut next_split_token = Lexer::find_next_split_token(line, start_index);
+
+        // TODO: Update to check for block keywords and regular keywords
+
+        // Check for keywords
+        let word_string = line[start_index..next_split_token.0].to_ascii_lowercase();
+        let word = word_string.as_str();
+        let token = if self.block_keywords.contains(&word) {
+            // Handle block keywords
+            Some(Token::BlockKeyword(&line[start_index..next_split_token.0]))
+        } else if self.keywords.contains(&word) {
+            if word == "define:" {
+                Some(Token::DefineKeyword)
+            } else {
+                None
+            }
+        } else {
+            // Not a keyword so parse until we hit an equal sign, the end of
+            // the line, or a comment
+
+            loop {
+                if next_split_token.1 == '='
+                    || next_split_token.1 == '\0'
+                    || (next_split_token.1 == '/'
+                        && next_split_token.0 < line.len()
+                        && line[next_split_token.0 + 1..].chars().peekable().next() == Some('/'))
+                {
+                    break;
+                }
+                next_split_token = Lexer::find_next_split_token(line, next_split_token.0 + 1);
+            }
+            // TODO: Need to check if this contains a Variable
+            Some(Token::ValueString(&line[start_index..next_split_token.0]))
+        };
+
+        if let Some(t) = token {
+            self.push_token(start_index, t, start_index + next_split_token.0 - 1);
+            // TODO: Need to move the starting location
+        }
+
+        match next_split_token.1 {
+            '=' => {
+                self.push_token(next_split_token.0, Token::AssignOp, next_split_token.0 + 1);
+            }
+            '/' => {
+                self.scan_comment(
+                    &line[start_index..next_split_token.0],
+                    start_index + next_split_token.0,
+                );
+                return;
+            }
+            _ => {}
+        }
+
+        let remaining = &line[next_split_token.0..];
+        let mut remaining_chars = remaining.char_indices().peekable();
+        let mut iter = remaining_chars.next();
+
+        // Need to scan for quotes, comments, &&, ||, Variables, numbers
+
+        let mut tok_start = iter.unwrap_or((0, '\0')).0;
+
+        let offset = next_split_token.0 + start_index;
+
+        let mut allow_primitives_count = 0_usize;
+    }
+
+    fn parse_line(&mut self) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
+        if let Some(token) = self.token_queue.pop_front() {
+            return Some(token);
+        }
+
+        match self.current {
+            None => return None, // End of file
+            Some((i, c)) => {
+                let line = if let Some((line, _rem)) = self.input[i..].split_once('\n') {
+                    line
+                } else {
+                    &self.input[i..]
+                }
+                .trim();
+
+                match c {
+                    '#' => self.scan_macro_str(i, line),
+                    _ => self.scan_line(i, line),
+                }
+            }
+        };
+
+        if let Some(token) = self.token_queue.pop_front() {
+            Some(token)
+        } else {
+            None
+        }
+    }
+
     fn _next(&mut self) -> Option<Spanned<Token<'input>, Location, MoosParseError<'input>>> {
         if let Some(token) = self.token_queue.pop_front() {
             return Some(token);
         }
 
+        return None;
         loop {
             let next_c = self.chars.peek().unwrap_or(&(0, '\0')).1;
             match self.current {
@@ -827,14 +1334,14 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                 Some((i, c)) => match c {
                     // Skip whitespace
                     ' ' | '\r' | '\t' => {}
-                    // Skip Escape characters
-                    '\\' => {
-                        self.current = self.chars.next();
-                        // Take an extra char for escape characters
-                        if let Some((_, _)) = self.current {
-                            self.current = self.chars.next()
-                        }
-                    }
+                    // // Skip Escape characters
+                    // '\\' => {
+                    //     self.current = self.chars.next();
+                    //     // Take an extra char for escape characters
+                    //     if let Some((_, _)) = self.current {
+                    //         self.current = self.chars.next()
+                    //     }
+                    // }
                     // New Lines
                     '\n' => {
                         self.handle_new_line();
@@ -868,7 +1375,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         return self.scan_identifier(i, c);
                     }
                     c if c == '/' && next_c == '/' => {
-                        return self.scan_comment(i);
+                        return self.scan_comment_old(i);
                     }
                     '"' | '\'' => {
                         return self.scan_quote(i, c);
@@ -894,6 +1401,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                         return self.scan_char(i, Token::AssignOp);
                     }
                     _ => {
+                        // TODO: This should probably use find_next_split_token
                         // Handle special cases
                         let next_whitespace = self.input[i..]
                             .char_indices()
@@ -982,6 +1490,62 @@ mod tests {
         lexer::{Lexer, Location, Token, TokenListener},
     };
     use log;
+
+    #[test]
+    pub fn test_tokenize() {
+        let input = r#"
+        "This is a quote"
+        // This is a comment
+        name = value
+        name with space = value with space
+        vehicle_name = ${HOST}-%(VEHICLE_NAME)_$(VEHICLE_ID)12345
+        ${CONFIG_VAR} = ${OTHER_VAR}
+        ${TEST//Comment} = Still a Comment
+        ProcessConfig = MyApp 
+        {
+            
+        }
+        "#;
+        let mut lexer = Lexer::new(input);
+
+        let expected_tokens = vec![
+            Token::EOL,
+            Token::Quote("This is a quote"),
+            Token::EOL,
+            Token::Comment("This is a comment"),
+            Token::EOL,
+            Token::ValueString("name"),
+            Token::AssignOp,
+            Token::ValueString("value"),
+            Token::EOL,
+            Token::ValueString("name with space"),
+            Token::AssignOp,
+            Token::ValueString("value with space"),
+            Token::EOL,
+            Token::ValueString("vehicle_name"),
+            Token::AssignOp,
+            Token::EnvVariable("HOST"),
+            Token::ValueString("-"),
+            Token::PlugUpperVariable("VEHICLE_NAME"),
+            Token::ValueString("_"),
+            Token::PlugVariable("VEHICLE_ID"),
+            Token::ValueString("12345"),
+            Token::EOL,
+            Token::EnvVariable("CONFIG_VAR"),
+            Token::AssignOp,
+            Token::EnvVariable("OTHER_VAR"),
+            Token::EOL,
+            Token::PartialEnvVariable("TEST"),
+            Token::Comment("Comment} = Still a Comment"),
+            Token::EOL,
+            Token::BlockKeyword("ProcessConfig"),
+        ];
+        lexer.tokenize();
+        check_tokens(&mut lexer, expected_tokens);
+        for t in lexer {
+            println!("Token: {:?}", t);
+        }
+    }
 
     #[test]
     pub fn test_scan_quote() {
@@ -1120,14 +1684,14 @@ mod tests {
         let input = "${MY_VAR}";
         let mut lexer = Lexer::new(input);
 
-        let expected_tokens = vec![Token::Variable("MY_VAR")];
+        let expected_tokens = vec![Token::EnvVariable("MY_VAR")];
 
         check_tokens(&mut lexer, expected_tokens);
 
         let input = "${MY_VAR}\n";
         let mut lexer = Lexer::new(input);
 
-        let expected_tokens = vec![Token::Variable("MY_VAR"), Token::EOL];
+        let expected_tokens = vec![Token::EnvVariable("MY_VAR"), Token::EOL];
 
         check_tokens(&mut lexer, expected_tokens);
 
@@ -1137,7 +1701,7 @@ mod tests {
         assert_eq!(
             (
                 Location::new(0, 0),
-                Token::Variable("THIS_is_a_VARIABLE"),
+                Token::EnvVariable("THIS_is_a_VARIABLE"),
                 Location::new(0, 20)
             ),
             iter.unwrap().unwrap()
@@ -1155,14 +1719,14 @@ mod tests {
         let input = "${MY_VAR";
         let mut lexer = Lexer::new(input);
 
-        let expected_tokens = vec![Token::PartialVariable("MY_VAR", '}')];
+        let expected_tokens = vec![Token::PartialEnvVariable("MY_VAR")];
 
         check_tokens(&mut lexer, expected_tokens);
 
         let input = "${MY_VAR\n";
         let mut lexer = Lexer::new(input);
 
-        let expected_tokens = vec![Token::PartialVariable("MY_VAR", '}'), Token::EOL];
+        let expected_tokens = vec![Token::PartialEnvVariable("MY_VAR"), Token::EOL];
 
         check_tokens(&mut lexer, expected_tokens);
 
@@ -1172,7 +1736,7 @@ mod tests {
         assert_eq!(
             (
                 Location::new(0, 0),
-                Token::PartialVariable("THIS_is_a_VARIABLE", '}'),
+                Token::PartialEnvVariable("THIS_is_a_VARIABLE"),
                 Location::new(0, 20)
             ),
             iter.unwrap().unwrap()
@@ -1510,6 +2074,87 @@ mod tests {
             Token::EOL,
             // TODO: Need to finish added test cases for macros
         ];
+        check_tokens(&mut lexer, expected_tokens);
+    }
+
+    fn test_scan_line_helper(lexer: &mut Lexer, test_str: &'static str, token: &Token) -> bool {
+        lexer.scan_line(0, test_str);
+        let r = lexer.next();
+
+        if let Some(t) = r {
+            if let Ok(tt) = t {
+                assert_eq!(tt.1, *token);
+                return tt.1 == *token;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn test_scan_line() {
+        let input = ""; // Input is not needed here
+        let mut lexer = Lexer::new(input);
+
+        assert!(test_scan_line_helper(
+            &mut lexer,
+            "test/ = test",
+            &Token::ValueString("test/ ")
+        ));
+
+        let mut lexer = Lexer::new(input);
+        assert!(test_scan_line_helper(
+            &mut lexer,
+            "processconfig = test",
+            &Token::BlockKeyword("processconfig")
+        ));
+
+        let mut lexer = Lexer::new(input);
+        assert!(test_scan_line_helper(
+            &mut lexer,
+            "define: TEST = test",
+            &Token::DefineKeyword
+        ));
+    }
+
+    #[test]
+    fn test_scan_variables() {
+        // TODO: Does this need to account for nested parens? $(VAL(123))
+        let input =
+            "targ_%(VEHICLE_NAME)_test1_${VEHICLE_ID}_test2_$(DATE).moos${END}${TEST//Comment}";
+        let input = "targ_%(VEHICLE_NAME)_test1_${VEHICLE_ID}_test2_$(DATE).moos${END}${TEST";
+
+        let mut lexer = Lexer::new(input);
+        //scan_variables(input, &mut tokens);
+        let expected_tokens = vec![
+            Token::ValueString("targ_"),
+            Token::PlugUpperVariable("VEHICLE_NAME"),
+            Token::ValueString("_test1_"),
+            Token::EnvVariable("VEHICLE_ID"),
+            Token::ValueString("_test2_"),
+            Token::PlugVariable("DATE"),
+            Token::ValueString(".moos"),
+            Token::EnvVariable("END"),
+            Token::PartialEnvVariable("TEST"),
+        ];
+
+        // TODO: This should not need to call scan_variables
+        lexer.scan_variables(input, 0, true, false);
+        check_tokens(&mut lexer, expected_tokens);
+
+        let input =
+            "targ_//%(VEHICLE_NAME)_test1_${VEHICLE_ID}_test2_$(DATE).moos${END}${TEST//Comment}";
+
+        let mut lexer = Lexer::new(input);
+        //scan_variables(input, &mut tokens);
+        let expected_tokens = vec![
+            Token::ValueString("targ_"),
+            Token::Comment(
+                "%(VEHICLE_NAME)_test1_${VEHICLE_ID}_test2_$(DATE).moos${END}${TEST//Comment}",
+            ),
+        ];
+
+        // TODO: This should not need to call scan_variables
+        lexer.scan_variables(input, 0, true, false);
         check_tokens(&mut lexer, expected_tokens);
     }
 

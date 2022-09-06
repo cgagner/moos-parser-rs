@@ -64,7 +64,7 @@ Define: Line<'input> = {
 // export TEST="TEST=1234"
 Assignment: Line<'input> = {
     <key:"Key"> "=" <value:Value> <comment:"Comment"?> "EOL" => Line::Assignment(key,value, comment),
-    <key:"Variable"> "=" <value:Value> <comment:"Comment"?> "EOL" => Line::Assignment(key,value, comment),
+    <key:"EnvVariable"> "=" <value:Value> <comment:"Comment"?> "EOL" => Line::Assignment(key,value, comment),
 }
 
 // TODO: The original MOOS parser treated everything after the equal sign as
@@ -204,8 +204,8 @@ extern {
         "Key" => Token::Key(<&'input str>),
         "ValueString" => Token::ValueString(<&'input str>),
         "EOL" => Token::EOL,
-        "Variable" => Token::Variable(<&'input str>),
-        "PartialVariable" => Token::PartialVariable(<&'input str>, <char>),
+        "EnvVariable" => Token::EnvVariable(<&'input str>),
+        "PartialEnvVariable" => Token::PartialEnvVariable(<&'input str>),
         "{" => Token::CurlyOpen,
         "}" => Token::CurlyClose,
         "int" => Token::Integer(<i64>),

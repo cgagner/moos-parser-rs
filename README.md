@@ -2,7 +2,6 @@
 
 Parser for MOOS-IvP mission files for Rust.
 
-
 ## TODO
 
 - [ ] Switch to scanning the whole line - Makes things easier.
@@ -16,6 +15,25 @@ Parser for MOOS-IvP mission files for Rust.
 - [ ] Need to handle variables in the middle of a string
 - [ ] Variables can also appear in a comment
 - [ ] Support "#define $(FOO) BAR" as well as "#define FOO BAR"
+- [ ] Missing New Line needs a better comment - Currently always reports "Need new line after application name"
+- [ ] Handle lines that start with # but are not macros
+- [ ] Handle keywords based on MOOS file or BHV file
+- [ ] Need to handle behaviors files differently
+  - [ ] Behaviors support # as comments
+  - [ ] Behaviors don't support 'define:'
+  - [ ] Behaviors don't support environment variables
+  - [ ] Behaviors can be static or dynamic 
+- [ ] Fix the test_scan_variables
+- [ ] Remove the handling of single quotes
+- [ ] Check for Plug variables in comments
+- [ ] Finish Marco parsing in lalrpop
+  - [ ] Add MacroIfDef
+  - [ ] Add MacroElseIfDef
+  - [ ] Add MacroIfNotDef
+- [ ] Update the Assignment type to take in a vector of tokens
+- [ ] Update Float, Int, Bool tokens to also take the original str
+- [ ] Add a warning to highlight `name=<empty_string>`
+- [ ] Add the ability to throw an error on a double `{` See PCR 114
 
 
 ## nsplug Questions
