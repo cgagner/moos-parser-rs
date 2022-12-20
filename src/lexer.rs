@@ -33,9 +33,9 @@ pub enum Token<'input> {
     Quote(&'input str),
     PartialQuote(&'input str, char),
     Key(&'input str),
-    Boolean(bool),
-    Integer(i64),
-    Float(f64),
+    Boolean(bool, &'input str),
+    Integer(i64, &'input str),
+    Float(f64, &'input str),
     AssignOp,
     ParenOpen,
     ParenClose,
@@ -419,7 +419,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             self.advance_to_iterator(next_split_token);
                             return Some(Ok((
                                 self.get_location(start_index),
-                                Token::Integer(value),
+                                Token::Integer(value, &self.input[start_index..next_split_token.0]),
                                 self.get_location(next_split_token.0),
                             )));
                         } else if let Ok(value) =
@@ -428,7 +428,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             self.advance_to_iterator(next_split_token);
                             return Some(Ok((
                                 self.get_location(start_index),
-                                Token::Float(value),
+                                Token::Float(value, &self.input[start_index..next_split_token.0]),
                                 self.get_location(next_split_token.0),
                             )));
                         } else if let Ok(value) =
@@ -437,7 +437,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             self.advance_to_iterator(next_split_token);
                             return Some(Ok((
                                 self.get_location(start_index),
-                                Token::Boolean(value),
+                                Token::Boolean(value, &self.input[start_index..next_split_token.0]),
                                 self.get_location(next_split_token.0),
                             )));
                         }
@@ -518,11 +518,11 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
 
             let token = if allow_primitives_count == 1 {
                 if let Ok(value) = Self::scan_integer(string) {
-                    Token::Integer(value)
+                    Token::Integer(value, remaining[*tok_start..index].trim())
                 } else if let Ok(value) = Self::scan_float(string) {
-                    Token::Float(value)
+                    Token::Float(value, remaining[*tok_start..index].trim())
                 } else if let Ok(value) = Self::scan_bool(string) {
-                    Token::Boolean(value)
+                    Token::Boolean(value, remaining[*tok_start..index].trim())
                 } else {
                     // If all else fails, add it as a string
                     Token::ValueString(string)
@@ -867,12 +867,36 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
     ) {
         // Sanity check that the input is at least 2 characters
         if line.len() < 2 {
+            // Handle cases where there is a single character. E.G. `a = 10`
+            if !line.is_empty() {
+                self.push_token(
+                    line_index,
+                    Token::ValueString(&line[0..]),
+                    line_index + line.len(),
+                );
+            }
             return;
         }
         println!(
             "Scanning for variables: {:?}, start_of_line: {:?}",
             line, start_of_line
         );
+
+        // Check for primitives
+        if found_assignment {
+            if let Ok(value) = Self::scan_integer(line) {
+                self.push_token(line_index, Token::Integer(value, line.trim()), line_index + line.len());
+                return;
+            } else if let Ok(value) = Self::scan_float(line)
+            {
+                self.push_token(line_index, Token::Float(value, line.trim()), line_index + line.len());
+                return;
+            } else if let Ok(value) = Self::scan_bool(line)
+            {
+                self.push_token(line_index, Token::Boolean(value, line.trim()), line_index + line.len());
+                return;
+            }
+        }
 
         let (input, line_index) = if start_of_line {
             let (input, line_index) = if let Some(index) = line.find("define:") {
@@ -1104,6 +1128,8 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             };
 
         // TODO: Is it better to use find or to just use the iterator
+        // TODO: This should probably break out one line at a time. 
+        todo!("This should break out to handle one line at a time");
         while let Some((i, c)) = iter.find(|&(_i, c)| {
             c == '\n'
                 || c == '"'
@@ -1111,6 +1137,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                 || ((c == '{' || c == '}') && start_of_line)
                 || (c == '/')
         }) {
+            // TODO: I don't think we always want to trim unhandled. E.G.: `name = some ${VAR} test`
             if let Some((prev_i, unhandled)) = get_unhanded_string(prev_index, i) {
                 self.scan_variables(unhandled.trim(), prev_i, start_of_line, found_assignment);
                 if !unhandled.trim().is_empty() {
@@ -1215,7 +1242,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
         }
         if let Some((prev_i, unhandled)) = get_unhanded_string(prev_index, self.input.len()) {
             if !unhandled.trim().is_empty() {
-                println!("Unhandled string: {:?}", unhandled);
+                println!("Unhandled string at end: {:?}", unhandled);
             } else {
                 println!("Skipping unhandled string: {:?}", unhandled);
             }
@@ -1326,7 +1353,15 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
             return Some(token);
         }
 
-        return None;
+        // TODO: This should only get called once
+        self.tokenize();
+
+        if let Some(token) = self.token_queue.pop_front() {
+            return Some(token);
+        } else {
+            return None;
+        }
+
         loop {
             let next_c = self.chars.peek().unwrap_or(&(0, '\0')).1;
             match self.current {
@@ -1420,7 +1455,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             self.current = self.chars.next();
                             return Some(Ok((
                                 self.get_location(i),
-                                Token::Integer(value),
+                                Token::Integer(value, &self.input[i..next_whitespace]),
                                 self.get_location(next_whitespace),
                             )));
                         } else if let Ok(value) = Self::scan_float(&self.input[i..next_whitespace])
@@ -1434,7 +1469,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             self.current = self.chars.next();
                             return Some(Ok((
                                 self.get_location(i),
-                                Token::Float(value),
+                                Token::Float(value, &self.input[i..next_whitespace]),
                                 self.get_location(next_whitespace),
                             )));
                         } else if let Ok(value) = Self::scan_bool(&self.input[i..next_whitespace]) {
@@ -1447,7 +1482,7 @@ impl<'input, 'listen> Lexer<'input, 'listen> {
                             self.current = self.chars.next();
                             return Some(Ok((
                                 self.get_location(i),
-                                Token::Boolean(value),
+                                Token::Boolean(value, &self.input[i..next_whitespace]),
                                 self.get_location(next_whitespace),
                             )));
                         }
@@ -1963,64 +1998,64 @@ mod tests {
             Token::EOL,
             Token::Comment("This is a test float"),
             Token::EOL,
-            Token::Key("a"),
+            Token::ValueString("a"),
             Token::AssignOp,
-            Token::Float(12345.0),
+            Token::Float(12345.0, "12345.0"),
             Token::EOL,
-            Token::Key("b"),
+            Token::ValueString("b"),
             Token::AssignOp,
-            Token::Integer(12345),
+            Token::Integer(12345, "12345"),
             Token::EOL,
             Token::EOL,
             Token::Comment("Another Float"),
             Token::EOL,
-            Token::Key("c"),
+            Token::ValueString("c"),
             Token::AssignOp,
-            Token::Float(-12341.0),
+            Token::Float(-12341.0, "-12341.0"),
             Token::EOL,
-            Token::Key("d"),
+            Token::ValueString("d"),
             Token::AssignOp,
-            Token::Integer(-12341),
+            Token::Integer(-12341, "-12341"),
             Token::EOL,
             Token::EOL,
             Token::Comment("Scientific Notation"),
             Token::EOL,
-            Token::Key("e"),
+            Token::ValueString("e"),
             Token::AssignOp,
-            Token::Float(2230.0),
+            Token::Float(2230.0, "2.23e3"),
             Token::EOL,
-            Token::Key("f"),
+            Token::ValueString("f"),
             Token::AssignOp,
-            Token::Float(1.0),
+            Token::Float(1.0, "+1.0"),
             Token::EOL,
-            Token::Key("g"),
+            Token::ValueString("g"),
             Token::AssignOp,
-            Token::Float(f64::NEG_INFINITY),
+            Token::Float(f64::NEG_INFINITY, "-inf"),
             Token::EOL,
-            Token::Key("h"),
+            Token::ValueString("h"),
             Token::AssignOp,
-            Token::Boolean(true),
+            Token::Boolean(true, "true"),
             Token::EOL,
-            Token::Key("i"),
+            Token::ValueString("i"),
             Token::AssignOp,
-            Token::Boolean(false),
+            Token::Boolean(false, "False"),
             Token::EOL,
-            Token::Key("j"),
+            Token::ValueString("j"),
             Token::AssignOp,
-            Token::Boolean(true),
+            Token::Boolean(true, "TRUE"),
             Token::EOL,
-            Token::Key("k"),
+            Token::ValueString("k"),
             Token::AssignOp,
             Token::ValueString("trues"),
             Token::EOL,
-            Token::Key("l"),
+            Token::ValueString("l"),
             Token::AssignOp,
             Token::Quote("true"),
             Token::EOL,
-            Token::Key("m"),
+            Token::ValueString("m"),
             Token::AssignOp,
-            Token::Quote("FALSE"),
-            Token::EOL,
+            Token::ValueString("'FALSE'"),
+            Token::EOL, // TODO: This is causing a panic because it
         ];
         check_tokens(&mut lexer, expected_tokens);
     }
@@ -2069,7 +2104,7 @@ mod tests {
             Token::EOL,
             Token::MacroIfDef,
             Token::ValueString("VALUE1"),
-            Token::Integer(12),
+            Token::Integer(12, "12"),
             Token::Comment("Test Comment"),
             Token::EOL,
             // TODO: Need to finish added test cases for macros

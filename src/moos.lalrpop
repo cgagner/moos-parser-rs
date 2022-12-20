@@ -72,9 +72,9 @@ Assignment: Line<'input> = {
 // Should we match the original implementation or write something that
 // applies stricter rules. E.G. keys must be an identifier: [a-zA-Z0-9_-.]+
 Value: crate::parser::Value<'input> = {
-    <value:"bool"> => crate::parser::Value::Boolean(value),
-    <value:"int"> => crate::parser::Value::Integer(value),
-    <value:"float"> => crate::parser::Value::Float(value),
+    <value:"bool"> => crate::parser::Value::Boolean(value.0),
+    <value:"int"> => crate::parser::Value::Integer(value.0),
+    <value:"float"> => crate::parser::Value::Float(value.0),
     <value:"ValueString"> => crate::parser::Value::String(value),
     <value:"Quote"> => crate::parser::Value::String(value),
 }
@@ -208,9 +208,9 @@ extern {
         "PartialEnvVariable" => Token::PartialEnvVariable(<&'input str>),
         "{" => Token::CurlyOpen,
         "}" => Token::CurlyClose,
-        "int" => Token::Integer(<i64>),
-        "float" => Token::Float(<f64>),
-        "bool" => Token::Boolean(<bool>),
+        "int" => Token::Integer(<i64>, <&'input str>),
+        "float" => Token::Float(<f64>, <&'input str>),
+        "bool" => Token::Boolean(<bool>, <&'input str>),
         "define" => Token::MacroDefine,
         "else" => Token::MacroElse,
         "elseifdef" => Token::MacroElseIfDef,
